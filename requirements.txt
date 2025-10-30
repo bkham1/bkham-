@@ -11,3 +11,4 @@ gtts
 num2words
 aminofix
 aminodorksfix
+amino.dorks.fix
