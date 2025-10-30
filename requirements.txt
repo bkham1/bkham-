@@ -1,5 +1,5 @@
 gtts
 num2words
-aminofix
+amino.dorks.fix
 
 
