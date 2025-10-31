@@ -26,16 +26,17 @@ from threading import Thread as T
 from random import choice, sample, randint
 from num2words import num2words 
 
-EMAIL = "abosaeg8@gmail.com"
-PASSWORD = "foo40k"
-API_KEY = "1bd49e6563fb5b744a999b6c050197a9"
+# قراءة البيانات الحساسة من Environment Variables
+EMAIL = os.getenv("EMAIL")
+PASSWORD = os.getenv("PASSWORD")
+API_KEY = os.getenv("API_KEY")
+
 BOT_NAME_AR = "رايس"
 BOT_NAME_EN = "Raise"
 BOT_ALIASES = {BOT_NAME_AR.lower(), BOT_NAME_EN.lower(), "!رايس", "!raise"}
 DEV_UID = "c0784194-8d1f-412d-b700-bf54b8b76904"
 DEV_LINK = "http://aminoapps.com/p/ypiy3p2"
 DEV_KEYWORDS = ["المطور", "كتشب", "من هو كتشب", "وين حساب كتشب", "من هو المطور", "مطور البوت"]
-
 BASE_DIR = os.path.dirname(os.path.abspath(__file__)) if "__file__" in globals() else os.getcwd()
 paths = {
     "responses": os.path.join(BASE_DIR, "ردود.txt"),
@@ -1808,4 +1809,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
