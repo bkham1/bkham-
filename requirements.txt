@@ -1,4 +1,4 @@
-amino.dorks.fix
+amino.dorks.fix==3.7.5.6
 flask
 num2words
 gtts
