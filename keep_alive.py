@@ -1,20 +1,15 @@
 from flask import Flask
 from threading import Thread
-import random
 
 app = Flask('')
 
-
 @app.route('/')
 def home():
-	return 'Bot is on'
-
+    return 'Bot is on'
 
 def run():
-	app.run(host='1.1.1.1', port=random.randint(2000, 9000))
-
+    app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
-
-	t = Thread(target=run)
-	t.start()
+    t = Thread(target=run)
+    t.start()
