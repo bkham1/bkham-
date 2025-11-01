@@ -14,6 +14,14 @@ except ImportError:
     print("❌ فشل استيراد ملف keep_alive.py. تأكد من وجوده في نفس مجلد البوت.")
 # END: Added import for external keep_alive.py
 
+# START: Added import for requests and proxy setup (NEW BLOCK)
+try:
+    import requests
+except ImportError:
+    print("❌ فشل استيراد مكتبة requests. قم بتثبيتها: pip install requests")
+    requests = None
+# END: Added import for requests and proxy setup
+
 try:
     import aminodorksfix as amino
     from aminodorksfix.lib.util.exceptions import UnexistentData
@@ -30,6 +38,10 @@ from num2words import num2words
 EMAIL = os.getenv("EMAIL")
 PASSWORD = os.getenv("PASSWORD")
 API_KEY = os.getenv("API_KEY")
+
+# START: Read proxy variable (NEW BLOCK)
+PROXY_URL = os.getenv("PROXY_URL") # مثال: 'http://user:pass@ip:port' أو 'socks5://ip:port'
+# END: Read proxy variable
 
 BOT_NAME_AR = "رايس"
 BOT_NAME_EN = "Raise"
@@ -547,17 +559,49 @@ def handle_game_command(subclint, content, userId, chatId, msgId, BOT_NAME="را
 client = amino.Client(api_key=API_KEY)
 
 def try_login(retries=6, delay=3):
+    global client # ADDED: Use the global client object
+
+    # START: Proxy setup logic (MODIFIED BLOCK)
+    if PROXY_URL and requests:
+        print(f"✅ تم العثور على بروكسي: {PROXY_URL}. جاري تهيئة العميل به...")
+        proxies = {
+            'http': PROXY_URL,
+            'https': PROXY_URL,
+        }
+        
+        # إنشاء جلسة requests وتجهيزها بالبروكسي
+        session = requests.Session()
+        session.proxies.update(proxies)
+        
+        # إعادة تهيئة كائن العميل مع الجلسة المجهزة بالبروكسي
+        try:
+            client = amino.Client(api_key=API_KEY, session=session)
+        except Exception as e:
+            print(f"❌ فشل في تهيئة العميل مع البروكسي/الجلسة: {e}. سيتم تجربة الدخول بدون بروكسي.")
+            # Revert client to default if proxy setup fails on client creation
+            client = amino.Client(api_key=API_KEY)
+    elif PROXY_URL and not requests:
+        print("❌ لم يتم تهيئة البروكسي! مكتبة requests غير موجودة. جاري استخدام الاتصال المباشر.")
+    else:
+        # تأكيد تهيئة العميل بدون جلسة مخصصة إذا كان قد تم تهيئته ببروكسي سابقًا
+        if not hasattr(client, 'session') or client.session is not None:
+             client = amino.Client(api_key=API_KEY)
+        print("لا يوجد بروكسي مُعرّف. جاري استخدام الاتصال المباشر.")
+    # END: Proxy setup logic
+    
     for i in range(retries):
         try:
             client.login(email=EMAIL, password=PASSWORD)
             print("تم الدخول إلى Amino.")
             return True
         except Exception as e:
-            print("Login attempt failed:", e)
+            print(f"Login attempt failed ({i+1}/{retries}): {e}")
             time.sleep(delay)
+            
+    print("❌ فشل الدخول لجميع المحاولات.")
     return False
 
-try_login()
+# try_login() # Removed from here, called in main()
 
 last_message = {}
 last_response_position = {}
@@ -1785,7 +1829,9 @@ def main():
     # END: keep_alive integration
     
     if not getattr(client, "profile", None):
-        try_login()
+        if not try_login(): # ADDED: Check login status
+             print("⚠️ فشل الدخول. لا يمكن تشغيل البوت.")
+             return # ADDED: Exit if login fails
 
     if not monitored_groups:
         print("لا يوجد قروبات للمراقبة. أضف رابط قروب واحد في قروبات.json")
@@ -1809,5 +1855,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
