@@ -32,7 +32,7 @@ from num2words import num2words
 EMAIL ="abosaeg8@gmail.com"
 PASSWORD ="foo40k"
 API_KEY ="1bd49e6563fb5b744a999b6c050197a9"
-PROXY_URL ="http://leAdmcMrn3SIpVEt:6MuHyFW8szSgY1Mz@geo.floppydata.com:10080"
+PROXY_URL ="https://FXX3hQkiJU7TYGj3:ygBQYv6Sc05tsvNx@geo.floppydata.com:10080"
 
 BOT_NAME_AR = "رايس"
 BOT_NAME_EN = "Raise"
@@ -1815,3 +1815,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
