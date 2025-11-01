@@ -7,12 +7,10 @@ import random
 import traceback
 import difflib
 import sys
-# START: Added import for external keep_alive.py
 try:
     import keep_alive
 except ImportError:
     print("❌ فشل استيراد ملف keep_alive.py. تأكد من وجوده في نفس مجلد البوت.")
-# END: Added import for external keep_alive.py
 
 try:
     import aminodorksfix as amino
@@ -26,13 +24,10 @@ from threading import Thread as T
 from random import choice, sample, randint
 from num2words import num2words 
 
-# قراءة البيانات الحساسة من Environment Variables
 EMAIL ="abosaeg8@gmail.com"
 PASSWORD ="foo40k"
 API_KEY ="1bd49e6563fb5b744a999b6c050197a9"
-# START: Added PROXY support
 PROXY_URL ="http://leAdmcMrn3SIpVEt:6MuHyFW8szSgY1Mz@geo.floppydata.com:10080"
-# END: Added PROXY support
 
 BOT_NAME_AR = "رايس"
 BOT_NAME_EN = "Raise"
@@ -547,7 +542,6 @@ def handle_game_command(subclint, content, userId, chatId, msgId, BOT_NAME="را
     
     return False
 
-# START: PROXY setup
 proxies = None
 if PROXY_URL:
     proxies = {
@@ -557,11 +551,10 @@ if PROXY_URL:
     print(f"✅ سيتم استخدام بروكسي: {PROXY_URL}")
 else:
     print("❌ لم يتم تحديد PROXY_URL، سيتم العمل بدون بروكسي.")
-# END: PROXY setup
 
-client = amino.Client(api_key=API_KEY, proxies=proxies) # Pass proxies to the client constructor
+client = amino.Client(api_key=API_KEY, proxies=proxies)
 
-def try_login(retries=6, delay=3):
+def try_login(retries=6, delay=600):
     for i in range(retries):
         try:
             client.login(email=EMAIL, password=PASSWORD)
@@ -601,12 +594,11 @@ def add_local_ban(uid, duration_seconds=None):
     save_json(paths["banned"], local_banned)
 
 def remove_local_ban(uid):
-    # START: FIX - Ensuring local_banned is a dict and handling key removal properly
     global local_banned
     if uid == DEV_UID: return
     
     if not isinstance(local_banned, dict):
-        local_banned = load_json(paths["banned"]) # Reload to ensure it's a dict
+        local_banned = load_json(paths["banned"])
         if not isinstance(local_banned, dict):
             local_banned = {}
 
@@ -615,7 +607,6 @@ def remove_local_ban(uid):
         save_json(paths["banned"], local_banned)
         return True
     return False
-    # END: FIX
     
 
 def is_local_banned(uid):
@@ -1164,7 +1155,7 @@ def process_message(m, sub, chat_obj):
 
         if (author_uid == DEV_UID) or author_is_supervisor:
             
-            # --- New Feature: Get User Info ---
+            
             if isinstance(txt, str) and txt.startswith(("!معلومات", "معلومات العضو")):
                 mentioned_list = exts.get("mentionedArray", [])
                 user_link_match = re.search(r'(http://aminoapps\.com/p/[a-zA-Z0-9]+)', txt)
@@ -1197,7 +1188,7 @@ def process_message(m, sub, chat_obj):
                     join_date = "N/A"
                     if created_time_str:
                          try:
-                            join_date = created_time_str.split('T')[0] # Get only the date part
+                            join_date = created_time_str.split('T')[0] 
                          except:
                             join_date = created_time_str 
 
@@ -1214,7 +1205,6 @@ def process_message(m, sub, chat_obj):
                     safe_send(sub, chat_id, f"❌ فشل جلب معلومات العضو. (الخطأ: {e})", replyTo=mid)
 
                 return
-            # --- End New Feature ---
             
             if isinstance(txt, str) and txt.startswith(("عفو عن", "العفو عن")):
                 
@@ -1331,7 +1321,6 @@ def process_message(m, sub, chat_obj):
                 return
 
             
-            # --- FIX: Updated 'فك الكتم' logic to reliably use remove_local_ban - Start ---
             if isinstance(txt, str) and txt.strip() in ("فك الكتم", "فك الحظر", "!فك الكتم", "!فك الحظر") or txt.startswith(("!فك_الكتم", "فك_الحظر", "!فك_الحظر")):
                 mentioned_list = exts.get("mentionedArray", [])
                 user_link_match = re.search(r'(http://aminoapps\.com/p/[a-zA-Z0-9]+)', txt)
@@ -1364,7 +1353,6 @@ def process_message(m, sub, chat_obj):
                 else:
                     safe_send(sub, chat_id, "❌ لم يتم العثور على أي من الأعضاء المذكورين في قائمة الكتم المحلي.", replyTo=mid)
                 return
-            # --- FIX: Updated 'فك الكتم' logic - End ---
 
             if author_uid == DEV_UID and isinstance(txt, str) and txt.startswith(("ترقيه إشراف", "ترقية إشراف")):
                 mentioned_list = exts.get("mentionedArray", [])
@@ -1788,7 +1776,6 @@ def monitor_loop_for_group(link):
             time.sleep(5)
 
 def main():
-    # START: keep_alive integration
     if 'keep_alive' in sys.modules and hasattr(keep_alive, 'keep_alive'):
         try:
             T(target=keep_alive.keep_alive, daemon=True).start()
@@ -1797,7 +1784,6 @@ def main():
             print(f"❌ خطأ عند محاولة تشغيل دالة keep_alive() من keep_alive.py: {e}")
     else:
         print("❌ لم يتم العثور على ملف keep_alive.py أو الدالة keep_alive() بداخله. لن يتم تفعيل الحفاظ على التشغيل.")
-    # END: keep_alive integration
     
     if not getattr(client, "profile", None):
         try_login()
