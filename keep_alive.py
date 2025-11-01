@@ -5,9 +5,10 @@ app = Flask('')
 
 @app.route('/')
 def home():
-    return 'Bot is on'
+    return "Bot is alive and running"
 
 def run():
+    # 🔹 هذا المنفذ المطلوب من Render
     app.run(host='0.0.0.0', port=8080)
 
 def keep_alive():
