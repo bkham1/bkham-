@@ -14,14 +14,6 @@ except ImportError:
     print("❌ فشل استيراد ملف keep_alive.py. تأكد من وجوده في نفس مجلد البوت.")
 # END: Added import for external keep_alive.py
 
-# START: Added import for requests and proxy setup (NEW BLOCK)
-try:
-    import requests
-except ImportError:
-    print("❌ فشل استيراد مكتبة requests. قم بتثبيتها: pip install requests")
-    requests = None
-# END: Added import for requests and proxy setup
-
 try:
     import aminodorksfix as amino
     from aminodorksfix.lib.util.exceptions import UnexistentData
@@ -35,13 +27,12 @@ from random import choice, sample, randint
 from num2words import num2words 
 
 # قراءة البيانات الحساسة من Environment Variables
-EMAIL = os.getenv("EMAIL")
-PASSWORD = os.getenv("PASSWORD")
-API_KEY = os.getenv("API_KEY")
-
-# START: Read proxy variable (NEW BLOCK)
-PROXY_URL = os.getenv("PROXY_URL") # مثال: 'http://user:pass@ip:port' أو 'socks5://ip:port'
-# END: Read proxy variable
+EMAIL ="abosaeg8@gmail.com"
+PASSWORD ="foo40k"
+API_KEY ="1bd49e6563fb5b744a999b6c050197a9"
+# START: Added PROXY support
+PROXY_URL ="http://leAdmcMrn3SIpVEt:6MuHyFW8szSgY1Mz@geo.floppydata.com:10080"
+# END: Added PROXY support
 
 BOT_NAME_AR = "رايس"
 BOT_NAME_EN = "Raise"
@@ -556,52 +547,32 @@ def handle_game_command(subclint, content, userId, chatId, msgId, BOT_NAME="را
     
     return False
 
-client = amino.Client(api_key=API_KEY)
+# START: PROXY setup
+proxies = None
+if PROXY_URL:
+    proxies = {
+        "http": PROXY_URL,
+        "https": PROXY_URL,
+    }
+    print(f"✅ سيتم استخدام بروكسي: {PROXY_URL}")
+else:
+    print("❌ لم يتم تحديد PROXY_URL، سيتم العمل بدون بروكسي.")
+# END: PROXY setup
+
+client = amino.Client(api_key=API_KEY, proxies=proxies) # Pass proxies to the client constructor
 
 def try_login(retries=6, delay=3):
-    global client # ADDED: Use the global client object
-
-    # START: Proxy setup logic (MODIFIED BLOCK)
-    if PROXY_URL and requests:
-        print(f"✅ تم العثور على بروكسي: {PROXY_URL}. جاري تهيئة العميل به...")
-        proxies = {
-            'http': PROXY_URL,
-            'https': PROXY_URL,
-        }
-        
-        # إنشاء جلسة requests وتجهيزها بالبروكسي
-        session = requests.Session()
-        session.proxies.update(proxies)
-        
-        # إعادة تهيئة كائن العميل مع الجلسة المجهزة بالبروكسي
-        try:
-            client = amino.Client(api_key=API_KEY, session=session)
-        except Exception as e:
-            print(f"❌ فشل في تهيئة العميل مع البروكسي/الجلسة: {e}. سيتم تجربة الدخول بدون بروكسي.")
-            # Revert client to default if proxy setup fails on client creation
-            client = amino.Client(api_key=API_KEY)
-    elif PROXY_URL and not requests:
-        print("❌ لم يتم تهيئة البروكسي! مكتبة requests غير موجودة. جاري استخدام الاتصال المباشر.")
-    else:
-        # تأكيد تهيئة العميل بدون جلسة مخصصة إذا كان قد تم تهيئته ببروكسي سابقًا
-        if not hasattr(client, 'session') or client.session is not None:
-             client = amino.Client(api_key=API_KEY)
-        print("لا يوجد بروكسي مُعرّف. جاري استخدام الاتصال المباشر.")
-    # END: Proxy setup logic
-    
     for i in range(retries):
         try:
             client.login(email=EMAIL, password=PASSWORD)
             print("تم الدخول إلى Amino.")
             return True
         except Exception as e:
-            print(f"Login attempt failed ({i+1}/{retries}): {e}")
+            print("Login attempt failed:", e)
             time.sleep(delay)
-            
-    print("❌ فشل الدخول لجميع المحاولات.")
     return False
 
-# try_login() # Removed from here, called in main()
+try_login()
 
 last_message = {}
 last_response_position = {}
@@ -1829,9 +1800,7 @@ def main():
     # END: keep_alive integration
     
     if not getattr(client, "profile", None):
-        if not try_login(): # ADDED: Check login status
-             print("⚠️ فشل الدخول. لا يمكن تشغيل البوت.")
-             return # ADDED: Exit if login fails
+        try_login()
 
     if not monitored_groups:
         print("لا يوجد قروبات للمراقبة. أضف رابط قروب واحد في قروبات.json")
