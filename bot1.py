@@ -7,10 +7,15 @@ import random
 import traceback
 import difflib
 import sys
+
 try:
     import keep_alive
+    keep_alive.keep_alive()
+    print("✅ keep_alive شغال بنجاح (سيرفر Flask مفتوح على المنفذ 8080)")
 except ImportError:
     print("❌ فشل استيراد ملف keep_alive.py. تأكد من وجوده في نفس مجلد البوت.")
+except Exception as e:
+    print(f"⚠️ فشل تشغيل keep_alive: {e}")
 
 try:
     import aminodorksfix as amino
