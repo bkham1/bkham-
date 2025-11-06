@@ -7,15 +7,8 @@ import random
 import traceback
 import difflib
 import sys
-
-try:
-    import keep_alive
-    keep_alive.keep_alive()
-    print("✅ keep_alive شغال بنجاح (سيرفر Flask مفتوح على المنفذ 8080)")
-except ImportError:
-    print("❌ فشل استيراد ملف keep_alive.py. تأكد من وجوده في نفس مجلد البوت.")
-except Exception as e:
-    print(f"⚠️ فشل تشغيل keep_alive: {e}")
+import requests
+from datetime import datetime
 
 try:
     import aminodorksfix as amino
@@ -24,16 +17,23 @@ except ImportError:
     import amino
     from amino.lib.util.exceptions import UnexistentData
 
-from gtts import gTTS
+try:
+    import edge_tts
+except ImportError:
+    print("Missing 'edge-tts' library. Please install it: pip install edge-tts")
+    sys.exit(1)
+import asyncio
+
 from threading import Thread as T
 from random import choice, sample, randint
 from num2words import num2words 
 
-EMAIL ="abosaeg8@gmail.com"
-PASSWORD ="foo40k"
-API_KEY ="1bd49e6563fb5b744a999b6c050197a9"
-PROXY_URL ="https://FXX3hQkiJU7TYGj3:ygBQYv6Sc05tsvNx@geo.floppydata.com:10080"
+import games
 
+EMAIL = "abosaeg8@gmail.com"
+PASSWORD = "foo40k"
+API_KEY = "1bd49e6563fb5b744a999b6c050197a9"
+GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"
 BOT_NAME_AR = "رايس"
 BOT_NAME_EN = "Raise"
 BOT_ALIASES = {BOT_NAME_AR.lower(), BOT_NAME_EN.lower(), "!رايس", "!raise"}
@@ -46,24 +46,49 @@ paths = {
     "unclear": os.path.join(BASE_DIR, "رسائل_غير_مفهومة.txt"),
     "profanity": os.path.join(BASE_DIR, "سباب.txt"),
     "warnings": os.path.join(BASE_DIR, "warnings.json"),
-    "seen": os.path.join(BASE_DIR, "seen_members.json"),
     "banned": os.path.join(BASE_DIR, "محظورون.json"),
     "admins": os.path.join(BASE_DIR, "مشرفين.json"),
     "groups": os.path.join(BASE_DIR, "قروبات.json"),
     "bots": os.path.join(BASE_DIR, "bots.json"),
+    "prize_queue": os.path.join(BASE_DIR, "prize_queue.json"), # <-- ملف الجوائز اليدوية
+    "bank": os.path.join(BASE_DIR, "bank.json"), # <-- ملف أرباح الألعاب الجديد
 }
 
+VOICE = "ar-OM-AbdullahNeural"
+
+async def _generate_tts_async(text, file_path):
+    communicate = edge_tts.Communicate(text, VOICE)
+    await communicate.save(file_path)
+
+def generate_tts_sync(text, file_path):
+    loop = None
+    try:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        loop.run_until_complete(_generate_tts_async(text, file_path))
+    except Exception as e:
+        print(f"Error in generate_tts_sync: {e}")
+        raise e
+    finally:
+        if loop:
+            loop.close()
+
+# --- تهيئة الملفات ---
 for k, p in paths.items():
     if not os.path.isfile(p):
-        if p.endswith("warnings.json") or p.endswith("seen_members.json") or p.endswith("banned.json") or p.endswith("admins.json"):
-            init = {} 
-        elif p.endswith(".json"):
-            init = ["http://aminoapps.com/p/tqfa4v3"] if os.path.basename(p) == "قروبات.json" else []
-            
         if p.endswith(".json"):
+            # تحديد القيمة الأولية بناءً على اسم الملف
+            if os.path.basename(p) in ("warnings.json", "banned.json", "admins.json", "prize_queue.json", "bank.json"):
+                init = {}
+            elif os.path.basename(p) == "قروبات.json":
+                init = ["http://aminoapps.com/p/tqfa4v3"]
+            else:
+                init = [] # لبقية ملفات json مثل bots.json
+                
             with open(p, "w", encoding="utf-8") as f:
                 json.dump(init, f, ensure_ascii=False, indent=2)
         else:
+            # لملفات .txt
             open(p, "w", encoding="utf-8").close()
 
 def load_json(p):
@@ -71,7 +96,8 @@ def load_json(p):
         with open(p, "r", encoding="utf-8") as f:
             return json.load(f)
     except Exception:
-        if os.path.basename(p) in ("warnings.json", "seen_members.json", "banned.json", "admins.json"):
+        # إرجاع القيمة الافتراضية الصحيحة إذا فشل التحميل
+        if os.path.basename(p) in ("warnings.json", "banned.json", "admins.json", "prize_queue.json", "bank.json"):
             return {}
         return []
 
@@ -82,12 +108,24 @@ def save_json(p, d):
     except Exception as e:
         print("Save error", p, e)
 
+# --- تحميل قواعد البيانات ---
 warnings_db = load_json(paths["warnings"])
-seen_members_db = load_json(paths["seen"])
 local_banned = load_json(paths["banned"])
 admins_db = load_json(paths["admins"])
 monitored_groups = load_json(paths["groups"]) or []
 bots_db = load_json(paths["bots"])
+prize_queue = load_json(paths["prize_queue"]) # <-- قائمة الدعم اليدوي
+bank_db = load_json(paths["bank"]) # <-- بنك أرباح الألعاب
+
+# --- متغيرات نظام الجوائز (اليدوية) ---
+prize_send_count = 0
+prize_system_paused = False
+prize_system_lock = threading.Lock()
+# ------------------------------
+
+# --- قفل خاص ببنك الألعاب ---
+bank_lock = threading.Lock()
+# ------------------------------
 
 qa_responses = {}
 try:
@@ -117,449 +155,9 @@ try:
 except Exception as e:
     print("خطأ بقراءة سباب.txt:", e)
 
-TRUE_FALSE_QUESTIONS = [
-    ("يوجد أكثر من 8 كواكب في مجموعتنا الشمسية.", "خطأ"),
-    ("الحوت الأزرق هو أكبر حيوان على وجه الأرض.", "صح"),
-    ("نهر النيل هو أطول نهر في العالم.", "صح"),
-    ("النمل يمكنه حمل أشياء تزن 50 ضعف وزنه.", "صح"),
-    ("أولمبياد عام 2024 سيقام في مدينة طوكيو.", "خطأ"),
-]
+client = amino.Client(api_key=API_KEY)
 
-NISBA_TOPICS = [
-    "الغرور", "النوم في الأماكن الغريبة", "البكاء في الأفلام", 
-    "سرعة نسيان الماضي", "هوس الشهرة", "الإدمان على الكولا", 
-    "حبك للمشاكل", "إمكانية أن تصبح مليونيراً", "الخجل",
-    "تفاؤلك لهذا اليوم", "قدرتك على تحمل الجوع", "جاذبيتك الخفية"
-]
-
-SOAREH_QUESTIONS = [
-    "سؤال صريح: ما هو القرار الذي لو عاد بك الزمن لتغيره فوراً؟",
-    "سؤال صريح: صف نفسك بكلمة واحدة، واشرح لماذا اخترتها.",
-    "سؤال صريح: ما هو الشيء الذي تخاف منه حقاً، ولا تجرؤ على البوح به؟",
-    "سؤال صريح: متى كانت آخر مرة بكيت فيها، وما هو السبب؟",
-    "سؤال صريح: ما هي العادة السيئة التي تحاول التخلص منها ولا تستطيع؟"
-]
-
-EATERAF_LINES = [
-    "اعترف: أغبى شيء سويته اليوم هو...",
-    "اعترف: آخر مرة سحبت على الدوام أو المدرسة كانت بسبب...",
-    "اعترف: أحياناً أتصنع أنني أفهم الموضوع عشان ما أبين غبي.",
-    "اعترف: أكره لما أحد يسوي لي...",
-    "اعترف: ما أقدر أعيش بدون...",
-]
-
-CHALLENGE_DARES = [
-    "تحدي: أرسل بصمة صوت تقول فيها 'أنا أمزح وأحب الأمزحة' خمس مرات متتالية بأسرع وقت.",
-    "تحدي: غير اسمك في القروب إلى 'أفضل لاعب في العالم' لمدة 5 دقائق.",
-    "تحدي: أرسل ملصق مضحك جداً من اختيارك في الشات الآن.",
-    "تحدي: قم بوصف لون المايك بشكل شعري ومبالغ فيه."
-]
-
-def handle_game_command(subclint, content, userId, chatId, msgId, BOT_NAME="رايس"):
-    
-    
-    if content == "العاب":
-        
-        fio = f"""[BC] 🤖 BOT Raise - رايس 🤖
-[C]-----------------------
-[C] 🏆 اكتب [ من الفائز 1,2,... ] لاختيار فائز عشوائي من بين الأرقام.
-[C]-----------------------
-[C] ❓ اكتب [ سؤال صريح ] لأسئلة الصراحة العميقة.
-[C]-----------------------
-[C] 🗣️ اكتب [ اعترف ] للحصول على طلب اعتراف مضحك.
-[C]-----------------------
-[C] 🔥 اكتب [ تحدي أو حقيقة ] لاختيار تحدي عشوائي.
-[C]-----------------------
-[C] ✨ اكتب [ نسبة ] لمعرفة ما تحب ومميزاتك اليوم
-[C]-----------------------
-[C] ✅ اكتب [ صح او خطأ ] لبدء مسابقة التخمين السريع
-[C]-----------------------
-[C] 🎤 اكتب [ تحدي مميز ] لبدء لعبة الصوت 🔥
-[C]-----------------------
-[C] ⚡ اكتب [ تحدي ] لبدء لعبة الكتابة السريعة (أرقام وحروف) ⚡
-[C]-----------------------
-[C] 🍀 اكتب [ حظ ] لمعرفة حظك اليوم 🎯
-[C]-----------------------
-[C] 🎰 اكتب [ تنزيل ] لتجربة لعبة الروليت 🎡
-[C]-----------------------
-[C] 🕹️ اكتب [ ابدا ] لبدء لعبة التنزيل
-[C]-----------------------
-[C] 🧠 اكتب [ خمن عمري ] لتجربة التخمين المضحك
-[C]-----------------------
-[C] 🎲 اكتب [ كت تويت ] لأسئلة تفاعلية أعمق
-[C]-----------------------
-[C] 🔊 اكتب [ قول <نص> ] لتحويل نص لصوت وإرساله
-[C]-----------------------
-[C] ⚔️ اكتب [ roll <عنصر1> <عنصر2> ... ] لاختيار عشوائي من العناصر (حد أقصى 10)
-[C]-----------------------
-[C] 🎭 اكتب [ لو خيروك ] للحصول على سؤال تحدي 
-[C]-----------------------
-[C] 💍 اكتب [ محيبس ] لمعرفة شرح اللعبة
-[C]-----------------------
-[C] 🦴 اكتب [ جيبة ] لنتيجة عشوائية مضحكة
-[C]-----------------------
-"""
-        try:
-            subclint.send_message(chatId=chatId, message=fio)
-            return True
-        except Exception:
-            return False
-
-    
-    if content.startswith("من الفائز"):
-        
-        text_after_command = content.replace("من الفائز", "", 1).strip()
-        
-        
-        numbers_str = re.findall(r'\d+', text_after_command)
-        
-        
-        try:
-            numbers = [int(n) for n in numbers_str if 1 <= int(n) <= 10]
-        except ValueError:
-            numbers = []
-
-        
-        if not numbers or len(numbers) < 2 or len(numbers) > 10:
-            kki = "[CB] ❌ خطأ في الإدخال!\n[C] يرجى كتابة 'من الفائز' متبوعة برقمين إلى عشرة أرقام مفصولة بفاصلة أو مسافة، والأرقام من 1 إلى 10 فقط (مثال: من الفائز 1, 2, 3, 4, 5)."
-            try:
-                subclint.send_message(chatId=chatId, message=kki, replyTo=msgId)
-            except Exception:
-                pass
-            return True
-            
-        
-        unique_numbers = list(set(numbers))
-        
-        
-        winner = choice(unique_numbers)
-        
-        
-        numbers_display = ", ".join(map(str, unique_numbers))
-        kki = f"[BC] 🏆 لعبة من الفائز (بين الأرقام: {numbers_display}):\n[C] الفائز العشوائي هو: {winner} 🎉"
-        
-        try:
-            subclint.send_message(chatId=chatId, message=kki, replyTo=msgId)
-            return True
-        except Exception:
-            pass
-            
-    
-    if content == "سؤال صريح":
-        q = choice(SOAREH_QUESTIONS)
-        try:
-            subclint.send_message(chatId=chatId, message=f"[BC] ❓ سؤال صريح:\n[C] {q}")
-            return True
-        except Exception:
-            pass
-
-    
-    if content == "اعترف":
-        e = choice(EATERAF_LINES)
-        try:
-            subclint.send_message(chatId=chatId, message=f"[BC] 🗣️ اعترف:\n[C] {e}")
-            return True
-        except Exception:
-            pass
-            
-    
-    if content == "تحدي أو حقيقة":
-        q_or_d = choice(["حقيقة", "تحدي"])
-        
-        if q_or_d == "حقيقة":
-            q = choice(SOAREH_QUESTIONS)
-            msg = f"[BC] 💡 حقيقة:\n[C] {q}"
-        else:
-            d = choice(CHALLENGE_DARES)
-            msg = f"[BC] ⚡ تحدي:\n[C] {d}"
-            
-        try:
-            subclint.send_message(chatId=chatId, message=msg)
-            return True
-        except Exception:
-            pass
-            
-            
-    if content.startswith("roll"):
-        
-        items_to_choose_from = content.split()[1:11] 
-        
-        if len(items_to_choose_from) < 2:
-            kki = "[CB] ❌ خطأ في الإدخال!\n[C] يرجى كتابة 'roll' متبوعة بعنصرين إلى عشرة عناصر على الأقل، مفصولة بمسافات (مثال: roll عنصر1 عنصر2 عنصر3)."
-            try:
-                subclint.send_message(chatId=chatId, message=kki, replyTo=msgId)
-            except Exception:
-                pass
-            return True
-            
-        winner = choice(items_to_choose_from)
-        
-        items_display = "، ".join(items_to_choose_from)
-        kki = f"[BC] 🎲 لعبة الاختيار العشوائي (بين: {items_display}):\n[C] الفائز العشوائي هو: {winner} 🎉"
-        
-        try:
-            subclint.send_message(chatId=chatId, message=kki, replyTo=msgId)
-            return True
-        except Exception:
-            pass
-
-    
-    if content == "نسبة":
-        topic = choice(NISBA_TOPICS)
-        score = randint(1, 10)
-        
-        if score <= 3:
-            comment = "🤦‍♂️ تحتاج إلى تطوير هذا الجانب قليلاً!"
-        elif score <= 7:
-            comment = "👍 نسبة معقولة، حافظ على مستواك."
-        else:
-            comment = "🤩 مذهل! أنت ملك/ملكة هذا الشيء!"
-            
-        kki = f"[BC] ✨ حاسبة {BOT_NAME} للنسب:\n[C] نسبة {topic} لديك هي: {score} من 10\n[C] {comment}"
-        try:
-            subclint.send_message(chatId=chatId, message=kki, replyTo=msgId)
-            return True
-        except Exception:
-            pass
-    
-    
-    if content == "صح او خطأ":
-        question, answer = choice(TRUE_FALSE_QUESTIONS)
-        
-        def send_question(subclint, chatId, question, answer):
-            try:
-                subclint.send_message(chatId=chatId, message="[BC] ⏳ مسابقة صح أو خطأ! لديك 10 ثواني للرد...")
-                time.sleep(1)
-                subclint.send_message(chatId=chatId, message=f"[CB] السؤال:\n{question}")
-                time.sleep(10)
-                subclint.send_message(chatId=chatId, message=f"[CB] 🔔 انتهى الوقت!\n[C] الإجابة الصحيحة هي: {answer}")
-            except Exception:
-                pass
-        
-        T(target=send_question, args=(subclint, chatId, question, answer)).start()
-        return True
-
-    
-    if content == "تحدي":
-        gt = """[BC] ⚡ تحدي الكتابة السريعة (أرقام وحروف)!
-[C] أول واحد يكتبها بسرعة وبدقة هو الفائز.
-[C] سأرسل الرمز بعد العدّ التنازلي..."""
-        try:
-            subclint.send_message(chatId=chatId, message=gt)
-            time.sleep(1)
-            for i in range(3, 0, -1):
-                subclint.send_message(chatId=chatId, message=str(i))
-                time.sleep(1)
-            
-            
-            chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789"
-            Finish = "".join(sample(chars, 10))
-            
-            subclint.send_message(chatId=chatId, message=f"[CB] [[ {Finish} ]]")
-            return True
-        except Exception:
-            pass
-
-    
-    if content == "تحدي مميز":
-        def run_audio_challenge(subclint, chatId):
-            try:
-                
-                random_number = randint(100000, 999999) 
-                Finish_text = str(random_number)
-                
-                subclint.send_message(chatId=chatId, message="[BC] 🎙️ تحدي الأرقام الصوتية:\n[C] سوف أرسل بصمة صوت وأقول فيها الرقم — أول واحد يكتبه بشكل صحيح هو الفائز.")
-                time.sleep(3)
-                
-                lan = "ar"
-                name = f"ss_{int(time.time())}.mp3"
-                
-                tts_text = num2words(random_number, lang='ar')
-                
-                gTTS(text=tts_text, lang=lan, slow=False).save(name)
-                
-                max_retries = 5
-                
-                for attempt in range(max_retries):
-                    try:
-                        with open(name, "rb") as fff:
-                            subclint.send_message(chatId=chatId, file=fff, fileType="audio")
-                        
-                        break 
-                    except Exception as e:
-                        if attempt < max_retries - 1:
-                            time.sleep(1) 
-                        else:
-                            raise e 
-                
-                os.remove(name)
-                
-                
-                subclint.send_message(chatId=chatId, message="[BC] ⏳ انتهى التحدي: 10 ثواني وسأرسل الرقم الصحيح...")
-                time.sleep(10)
-                subclint.send_message(chatId=chatId, message=f"[CB] 🔔 الإجابة الصحيحة هي:\n{Finish_text}")
-                
-            except Exception as e:
-                try:
-                    subclint.send_message(chatId=chatId, message=f"❌ حدث خطأ في تحدي مميز: {e}")
-                except Exception:
-                    pass
-        
-        T(target=run_audio_challenge, args=(subclint, chatId)).start()
-        return True
-
-    
-    if content.startswith("قول"):
-        texxxt = content.replace('قول', '', 1).strip()
-        if texxxt:
-            def run_tts(subclint, chatId, msgId, text):
-                try:
-                    
-                    text_clean = re.sub(r'\[[A-Z]+\]', '', text).strip()
-                    if not text_clean:
-                        raise ValueError("النص فارغ بعد التنظيف.")
-                        
-                    lan = "ar"
-                    name = os.path.join(BASE_DIR, f"tts_{int(time.time())}.mp3")
-                    
-                    gTTS(text=text_clean, lang=lan, slow=False).save(name)
-                    
-                    max_retries = 5 
-                    
-                    for attempt in range(max_retries):
-                        try:
-                            with open(name, "rb") as fff:
-                                subclint.send_message(chatId=chatId, file=fff, fileType="audio", replyTo=msgId)
-                            
-                            break 
-                        except Exception as e:
-                            if attempt < max_retries - 1:
-                                time.sleep(1) 
-                            else:
-                                raise e 
-                    
-                    os.remove(name)
-                except Exception as e:
-                    print(f"TTS Error: {e}")
-                    
-            
-            T(target=run_tts, args=(subclint, chatId, msgId, texxxt)).start()
-            return True
-
-    
-    if content == "لو خيروك":
-        g = choice([
-            "لو خيروك أن تستبدل اسمك الحالي باسم 'مستر بيضة' مدى الحياة، أو أن تأكل بيضة نيئة في بث مباشر.",
-            "لو خيروك أن تلبس جميع ملابسك بالمقلوب لمدة أسبوع، أو أن تستخدم اسم مستعار غبي في كل منصاتك.",
-            "لو خيروك أن تكتشف مستقبلك البائس، أو أن تعيش طفولتك البائسة مجدداً.",
-            "لو خيروك أن تخسر حاسة التذوق مدى الحياة، أو أن تستمع لأغنية واحدة فقط مدى الحياة."
-        ])
-        try:
-            subclint.send_message(chatId=chatId, message=f"[BC] 🎭 لو خيّروك:\n[C] {g}")
-            return True
-        except Exception:
-            pass
-
-    
-    if content == 'كت تويت':
-        m = choice([
-            "كت تويت| ما هو أغرب حلم تكرر معك؟",
-            "كت تويت| ثلاثة أشياء لا تغادر محفظتك أبداً؟",
-            "كت تويت| أفضل هدية تلقيتها في حياتك؟",
-            "كت تويت| قرار تندم على اتخاذه حتى اليوم؟",
-            "كت تويت| ما هو الشيء الذي يجعلك تخسر أعصابك فوراً؟"
-        ])
-        try:
-            subclint.send_message(chatId=chatId, message=f"[BC] 🗣️ كت تويت:\n[C] {m}")
-            return True
-        except Exception:
-            pass
-
-    
-    if content == "حظ":
-        g = choice([str(i) for i in range(1,11)])
-        uiu = f"""[BC] 🍀 حظ اليوم:\n[C] من بين 1 الي 10\n[C] حصلت على -[ {g} ]-"""
-        try:
-            subclint.send_message(chatId=chatId, message=uiu)
-            return True
-        except Exception:
-            pass
-
-    
-    if content == "تنزيل":
-        yi = """[BC] 🎰 لعبة التنزيل (الروليت):\n[C] سيتم اختيار رقم عشوائي من 1 إلى 12.\n[C] العضو المختار يهبط من المايك (على مسؤولية المضيف).\n[C] المضيف يكتب 'ابدا' ليبدأ اللعب."""
-        try:
-            subclint.send_message(chatId=chatId, message=yi)
-            return True
-        except Exception:
-            pass
-
-    
-    if content == "ابدا":
-        g = choice([str(i) for i in range(1,13)])
-        uiu = f"""[BC] 🎯 النتيجة:\n[C] تم اختيار عضو رقم : {g}\n[C] المضيف يكتب 'ابدا' مرة أخرى لاستمرار اللعب."""
-        try:
-            subclint.send_message(chatId=chatId, message=uiu)
-            return True
-        except Exception:
-            pass
-
-    
-    if content.startswith("خمن عمري"):
-        io = ['15','16','17','18','19','20','21','22','23','24','25','26','27','28','29','30','75','100','150','250','أنت طاقة نقية، العمر مجرد رقم!']
-        g = choice(io)
-        try:
-            subclint.send_message(chatId=chatId, message=f"[BC] 🧠 تخمين {BOT_NAME}:\n[C] {g}", replyTo=msgId)
-            return True
-        except Exception:
-            pass
-            
-    
-    if content.startswith("احبك"):
-        io = ["حبتك حية 🐍", "اعشقك 🥰", "أموت فيك ❤️", "عنجد؟ طيب أثبت لي!", "يا ليتني أعرف من أنت لأحبك أيضاً 😉"]
-        g = choice(io)
-        try:
-            subclint.send_message(chatId=chatId, message=g, replyTo=msgId)
-            return True
-        except Exception:
-            pass
-
-    
-    if content == "محيبس":
-        
-        yi = """[BC] 💍 شرح لعبة محيبس (جيس المحابس):\n[C] 1. يُقسم اللاعبون إلى فريقين.\n[C] 2. يخفي لاعب واحد من الفريق الأول قطعة صغيرة (المحبس) في إحدى يديه، ويخبئها بين بقية اللاعبين في فريقه.\n[C] 3. يرسل الفريق الأول لاعباً واحداً (الجايس) ليحاول تخمين اليد التي فيها المحبس من بين الفريق المنافس.\n[C] 4. الفريق الثاني يطرح أسئلة أو يطلب إظهار بعض الأيدي حتى يتمكن الجايس من التخمين الصحيح.\n[C] 5. في الشات: يمكن لعبها عبر إخفاء شخص ما عن طريق وضع رقم عشوائي يمثل هذا الشخص ومحاولة الجايس تخمين الرقم الصحيح."""
-        try:
-            subclint.send_message(chatId=chatId, message=yi)
-            return True
-        except Exception:
-            pass
-
-    
-    if content == "جيبة":
-        g = choice(['عضمة رقم واحد', 'عضمة رقم ثنين', 'عضمة رقم ثلاثة', 'عضمة رقم أربعة', 'عضمة رقم خمسة', 'عضمة رقم ستة', 'عضمة رقم سبعة', 'عضمة رقم ثمانية', 'عضمة رقم تسعة', 'عضمة رقم عشرة'])
-        uiu = f"""[BC] 🦴 نتيجة الجيبة:\n[C] تلعب خوش تلعب: {g}"""
-        try:
-            subclint.send_message(chatId=chatId, message=uiu)
-            return True
-        except Exception:
-            pass
-
-    
-    return False
-
-proxies = None
-if PROXY_URL:
-    proxies = {
-        "http": PROXY_URL,
-        "https": PROXY_URL,
-    }
-    print(f"✅ سيتم استخدام بروكسي: {PROXY_URL}")
-else:
-    print("❌ لم يتم تحديد PROXY_URL، سيتم العمل بدون بروكسي.")
-
-client = amino.Client(api_key=API_KEY, proxies=proxies)
-
-def try_login(retries=6, delay=600):
+def try_login(retries=6, delay=3):
     for i in range(retries):
         try:
             client.login(email=EMAIL, password=PASSWORD)
@@ -572,8 +170,26 @@ def try_login(retries=6, delay=600):
 
 try_login()
 
-last_message = {}
+last_message_processed = {}
+message_processing_lock = threading.Lock()
 last_response_position = {}
+
+
+def call_gemini(prompt_text):
+    if not GEMINI_API_KEY or GEMINI_API_KEY == "YOUR_GEMINI_API_KEY_HERE":
+        return "[C] خدمة الذكاء الاصطناعي غير مفعّلة حالياً."
+    try:
+        url = "https://generativelace.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent"
+        headers = {"Content-Type": "application/json"}
+        params = {"key": GEMINI_API_KEY}
+        data = {"contents": [{"parts": [{"text": prompt_text}]}]}
+        response = requests.post(url, headers=headers, params=params, json=data, timeout=30)
+        response.raise_for_status()
+        result = response.json()
+        return result["candidates"][0]["content"]["parts"][0]["text"].replace("*", "").replace("\"", "").strip()
+    except Exception as e:
+        print(f"خطأ في Gemini: {e}")
+        return "[C] فشل الاتصال بخدمة Gemini."
 
 def difflib_ratio(a, b):
     a_norm = a.replace("أ", "ا").replace("إ", "ا").replace("آ", "ا").replace("ى", "ي").replace("ة", "ه").lower()
@@ -599,20 +215,9 @@ def add_local_ban(uid, duration_seconds=None):
     save_json(paths["banned"], local_banned)
 
 def remove_local_ban(uid):
-    global local_banned
     if uid == DEV_UID: return
-    
-    if not isinstance(local_banned, dict):
-        local_banned = load_json(paths["banned"])
-        if not isinstance(local_banned, dict):
-            local_banned = {}
-
-    if uid in local_banned:
-        local_banned.pop(uid, None)
-        save_json(paths["banned"], local_banned)
-        return True
-    return False
-    
+    local_banned.pop(uid, None)
+    save_json(paths["banned"], local_banned)
 
 def is_local_banned(uid):
     if not uid:
@@ -662,34 +267,22 @@ def delete_message(sub, messageId, chatId=None):
             pass
     return False
 
-def pin_message(sub, messageId, chatId=None):
-    try:
-        sub.pin_message(chatId=chatId, messageId=messageId)
-        return True
-    except Exception:
-        try:
-            if hasattr(sub, "session") and hasattr(sub, "comId") and chatId:
-                url = f"https://service.aminoapps.com/api/v1/x{sub.comId}/s/chat/thread/{chatId}/pin"
-                r = sub.session.post(url, json={"messageId": messageId}, headers=sub.parse_headers(), timeout=10)
-                return r.status_code in (200, 204)
-        except Exception:
-            pass
-    return False
-
 def kick_user(sub, uid, chatId=None, temporary=True):
     if uid == DEV_UID:
         return False
 
+    methods = []
     if temporary:
         methods = [
-            lambda: sub.kick(chatId=chatId, userId=uid),
-            lambda: client.kick(chatId=chatId, userId=uid)
+            lambda: sub.kick(chatId=chatId, userId=uid, allowRejoin=True),
+            lambda: client.kick(chatId=chatId, userId=uid, allowRejoin=True)
         ]
     else:
         methods = [
+            lambda: sub.kick(chatId=chatId, userId=uid, allowRejoin=False),
+            lambda: client.kick(chatId=chatId, userId=uid, allowRejoin=False),
             lambda: sub.ban(chatId=chatId, userId=uid),
-            lambda: client.ban(chatId=chatId, userId=uid),
-            lambda: sub.kick(chatId=chatId, userId=uid)
+            lambda: client.ban(chatId=chatId, userId=uid)
         ]
 
     for fn in methods:
@@ -716,12 +309,33 @@ def kick_user(sub, uid, chatId=None, temporary=True):
             pass
     return False
 
+def kick_user_from_all_chats(target_uid):
+    if target_uid == DEV_UID: return [], []
+    
+    kicked_from = []
+    failed_in = []
+    
+    current_monitored = list(monitored_groups)
+    for link in current_monitored:
+        try:
+            comId, objectId, full_link = get_chat_and_community_ids(link)
+            if comId and objectId:
+                sub = amino.SubClient(comId=comId, profile=client.profile)
+                
+                if kick_user(sub, target_uid, chatId=objectId, temporary=True):
+                    kicked_from.append(objectId)
+                else:
+                    failed_in.append(objectId)
+                time.sleep(1) 
+        except Exception:
+            failed_in.append(link)
+    print(f"Global kick for {target_uid}: Success in {len(kicked_from)} chats, Failed in {len(failed_in)} chats.")
+    return kicked_from, failed_in
+
 def is_supervisor(uid):
     if uid == DEV_UID:
         return True
     if isinstance(admins_db, dict):
-        return admins_db.get(uid, False)
-    if isinstance(admins_db, list):
         return uid in admins_db
     return False
 
@@ -732,9 +346,10 @@ def get_user_nickname(uid):
     except Exception:
         return ""
 
+
 def check_command_protection(author_uid, target_uid, chat_id, mid, sub):
     if target_uid == DEV_UID:
-        msg = f"⚠️ لا أستطيع تنفيذ أي أمر ضد المطور، حساب المطور: http://aminoapps.com/p/bnudkj"
+        msg = f"⚠️ لا أستطيع تنفيذ أي أمر ضد المطور، حساب المطور: {DEV_LINK}"
         safe_send(sub, chat_id, msg, replyTo=mid)
         return True
 
@@ -780,24 +395,91 @@ def mention_user_in_message(sub, chatId, uid, text, replyTo=None):
         except Exception:
             return False
 
+def collect_all_uids(sub, chat_id):
+    all_users = []
+    start = 0
+    size = 100
+    max_members = 1000 
+    
+    while len(all_users) < max_members:
+        try:
+            users_resp = sub.get_chat_users(chatId=chat_id, start=start, size=size)
+            
+            user_list = users_resp.userProfileList if hasattr(users_resp, 'userProfileList') else (getattr(users_resp, 'json', []) or [])
+
+            if not user_list:
+                break
+            
+            users_in_chunk = []
+            for user in user_list:
+                if isinstance(user, dict) and user.get("uid"):
+                    uid = user.get("uid")
+                    nickname = user.get("nickname", "User") 
+                    users_in_chunk.append((uid, nickname))
+                elif hasattr(user, 'uid'):
+                    uid = getattr(user, 'uid')
+                    nickname = getattr(user, 'nickname', 'User')
+                    users_in_chunk.append((uid, nickname))
+
+            all_users.extend(users_in_chunk)
+            
+            start += size
+            if len(user_list) < size:
+                break
+        except Exception as e:
+            print(f"Error collecting chat members: {e}")
+            break
+            
+    return all_users
+
 def mention_everyone_in_chat(sub, chatId, replyTo=None, message_text="منشن من رايس"):
     try:
-        resp = sub.get_chat_members(chatId=chatId)
-        members = resp.get("memberList", []) if isinstance(resp, dict) else (resp or [])
-        mentioned = [{"uid": m.get("uid")} for m in members if isinstance(m, dict) and m.get("uid")]
+        all_users = collect_all_uids(sub, chatId)
+        my_uid = getattr(getattr(client, "profile", {}), "userId", None)
         
-        if mentioned:
-            try:
-                sub.send_message(chatId=chatId, message=message_text, extensions={"mentionedArray": mentioned}, replyTo=replyTo)
-                return True
-            except Exception:
-                pass
+        all_users_filtered = [u for u in all_users if u[0] != my_uid]
+
+        if not all_users_filtered or len(all_users_filtered) < 2:
+            count = len(all_users_filtered)
+            safe_send(sub, chatId, f"[C] تعذر عمل منشن، العدد الحالي هو {count}، يجب أن يكون 2 على الأقل.", replyTo=replyTo)
+            return False
         
-        safe_send(sub, chatId, "@all " + message_text, replyTo=replyTo)
+        total_members = len(all_users_filtered)
+        chunk_size = 100 
+
+        for i in range(0, total_members, chunk_size):
+            chunk = all_users_filtered[i:i + chunk_size]
+            
+            chunk_uids = [u[0] for u in chunk] 
+            chunk_nicknames = [f"@{u[1]}" for u in chunk]
+            
+            chunk_num = (i // chunk_size) + 1
+            
+            if i == 0:
+                prefix_msg = f"[C] {message_text}\n[C] جاري عمل منشن لـ {total_members} عضو. الدفعة {chunk_num}:\n"
+            else:
+                prefix_msg = f"[C] [تكملة المنشن] الدفعة {chunk_num}:\n"
+                
+            chunk_content = prefix_msg + " ".join(chunk_nicknames)
+            
+            for attempt in range(3):
+                try:
+                    sub.send_message(
+                        chatId=chatId, 
+                        message=chunk_content, 
+                        mentionUserIds=chunk_uids,
+                        replyTo=replyTo if i == 0 else None
+                    ) 
+                    time.sleep(1) 
+                    break
+                except Exception as e:
+                    print(f"Error during mention chunk {chunk_num}: {e}")
+                    time.sleep(2)
         return True
     except Exception as e:
         print(f"Error mentioning everyone: {e}")
         return False
+
 
 def handle_text_mentioning_dev(txt, sub, chat_id, mid):
     try:
@@ -895,7 +577,7 @@ def get_default_response(chatId=None):
         "زين؟ وبعدين؟",
         "مو فاضي لك",
         "اخلص، عندي شغل",
-        "ترا ما نمت، وش بغيت؟",
+        "ترا ما نمtت، وش بغيت؟",
         "يا رب وش هالنِشبة؟",
         "ما فهمت وش تقول، تعبتني",
         "يا ليت تتكلم بوضوح، مو ناقص تعقيد",
@@ -995,9 +677,7 @@ def get_supervisors_list():
     try:
         out = []
         if isinstance(admins_db, dict):
-            uids = [k for k, v in admins_db.items() if v]
-        elif isinstance(admins_db, list):
-            uids = list(admins_db)
+            uids = list(admins_db.keys())
         else:
             uids = []
             
@@ -1014,14 +694,196 @@ def get_supervisors_list():
     except Exception:
         return []
 
+# --- 
+# --- !!! نظام الجوائز اليدوي (للمشرفين) !!!
+# ---
+
+def add_to_prize_queue(uid, amount):
+    """(يدوي) إضافة جائزة إلى قائمة الانتظار (آمنة للخيوط)"""
+    global prize_queue
+    try:
+        if not isinstance(prize_queue, dict):
+            prize_queue = {}
+        prize_queue[uid] = prize_queue.get(uid, 0) + amount
+        save_json(paths["prize_queue"], prize_queue)
+        print(f"Added {amount} coins for UID {uid} to prize queue.")
+    except Exception as e:
+        print(f"Error in add_to_prize_queue: {e}")
+
+def reset_prize_pause():
+    """(يدوي) إعادة تعيين عداد الجوائز بعد انتهاء فترة التوقف"""
+    global prize_system_paused, prize_send_count, prize_system_lock
+    with prize_system_lock:
+        prize_system_paused = False
+        prize_send_count = 0
+        print("Prize system pause lifted. Ready to award again.")
+
+def send_coins_to_global_post(uid, amount):
+    """
+    (عالمي) يبحث عن آخر منشور عالمي للعضو ويرسل له القروش.
+    يرجع (True, "global_post") أو (False, "error_message")
+    """
+    try:
+        blogs = client.get_user_blogs(userId=uid, start=0, size=1)
+        if blogs and isinstance(blogs, dict) and blogs.get("blogList"):
+            first_blog = blogs["blogList"][0]
+            g_comId = first_blog.get("ndcId") # ndcId هو comId
+            g_blogId = first_blog.get("blogId")
+            
+            if g_comId and g_blogId:
+                print(f"Found GLOBAL blogId: {g_blogId} in comId: {g_comId} for {uid}")
+                temp_sub = amino.SubClient(comId=g_comId, profile=client.profile)
+                temp_sub.send_coins(blogId=g_blogId, coins=amount)
+                return True, "global_post"
+        
+        print(f"No GLOBAL blog found for {uid}")
+        return False, "not_found"
+        
+    except Exception as e:
+        print(f"Error in send_coins_to_global_post for {uid}: {e}")
+        return False, str(e)
+
+
+def award_prize(sub, uid, amount, chat_id_for_report=None):
+    """(يدوي) الدالة الرئيسية لمنح الجوائز (مع نظام التوقف وقائمة الانتظار)"""
+    global prize_system_paused, prize_send_count, prize_system_lock
+    
+    if not uid or not amount or not sub:
+        return
+
+    try:
+        nickname = get_user_nickname(uid) or uid
+        
+        with prize_system_lock:
+            if prize_system_paused:
+                add_to_prize_queue(uid, amount)
+                if chat_id_for_report:
+                    safe_send(sub, chat_id_for_report, f"مبروك {nickname}! تم إضافة {amount} قرش إلى رصيدك (في قائمة الانتظار بسبب الضغط).")
+                return
+
+            if prize_send_count >= 10:
+                prize_system_paused = True
+                threading.Timer(300.0, reset_prize_pause).start() # 5 دقائق
+                add_to_prize_queue(uid, amount)
+                print("Prize system paused for 5 minutes (10 prizes sent).")
+                if chat_id_for_report:
+                    safe_send(sub, chat_id_for_report, f"مبروك {nickname}! تم إضافة {amount} قرش إلى رصيدك (في قائمة الانتظار بسبب الضغط).")
+                return
+
+            success, method = send_coins_to_global_post(uid, amount)
+            
+            if success:
+                prize_send_count += 1
+                print(f"Successfully sent {amount} coins to {uid} ({method}) (Count: {prize_send_count}/10)")
+                if chat_id_for_report:
+                    safe_send(sub, chat_id_for_report, f"🎉 مبروك {nickname}! تم إرسال {amount} قرش كجائزة إلى منشورك العالمي!")
+            else:
+                print(f"Global send method failed for {uid}. Adding to queue.")
+                add_to_prize_queue(uid, amount)
+                if chat_id_for_report:
+                    safe_send(sub, chat_id_for_report, f"مبروك {nickname}! تعذر إرسال {amount} قرش (خطأ بالدعم). تم حفظها لك.")
+                
+    except Exception as e:
+        print(f"Error in award_prize: {e}")
+        add_to_prize_queue(uid, amount) # حفظ الجائزة كإجراء احتياطي
+
+def process_prize_queue(sub, chat_id):
+    """(يدوي) معالجة قائمة الانتظار للجوائز (أمر !دعم المستحقين)"""
+    global prize_queue
+    
+    if not isinstance(prize_queue, dict) or not prize_queue:
+        safe_send(sub, chat_id, "ℹ️ قائمة المستحقين (اليدوية) فارغة.")
+        return
+
+    queue_copy = dict(prize_queue) # نسخة للعمل عليها
+    success_count = 0
+    fail_count = 0
+    
+    for uid, amount in queue_copy.items():
+        if amount <= 0: # تخطي المبالغ الصفرية
+            prize_queue.pop(uid, None)
+            continue
+            
+        success, method = send_coins_to_global_post(uid, amount)
+        
+        if success:
+            prize_queue.pop(uid, None) # نجح، احذفه من الطابور
+            success_count += 1
+            print(f"Queue: Successfully sent {amount} to {uid} ({method})")
+            time.sleep(1) # لتجنب الحظر
+        else:
+            print(f"Queue: Global send method failed for {uid}")
+            fail_count += 1
+    
+    save_json(paths["prize_queue"], prize_queue) # حفظ القائمة المحدثة
+    safe_send(sub, chat_id, f"✅ اكتمل دعم المستحقين:\n- تم دعم: {success_count} أعضاء.\n- فشل/مؤجل: {fail_count} أعضاء (لا يزالون في القائمة).")
+
+# ------------------------------------------
+
+# --- 
+# --- !!! نظام بنك الألعاب (تلقائي) !!!
+# ---
+
+def update_bank_balance(uid, nickname, amount_to_add):
+    """(تلقائي) تحديث رصيد الفائز في بنك الألعاب (آمن للخيوط)"""
+    global bank_db
+    if not uid or not nickname or not amount_to_add:
+        return
+        
+    with bank_lock:
+        if not isinstance(bank_db, dict):
+            bank_db = {}
+            
+        if uid not in bank_db:
+            bank_db[uid] = {"nickname": nickname, "coins": 0}
+        
+        bank_db[uid]["coins"] = bank_db[uid].get("coins", 0) + amount_to_add
+        bank_db[uid]["nickname"] = nickname # تحديث الاسم دائماً
+        
+        save_json(paths["bank"], bank_db)
+        print(f"Bank updated for {uid} ({nickname}): Added {amount_to_add}, New total: {bank_db[uid]['coins']}")
+
+def get_bank_balance(uid):
+    """(تلقائي) جلب رصيد بنك الألعاب للعضو"""
+    if not isinstance(bank_db, dict):
+        return 0
+    return bank_db.get(uid, {}).get("coins", 0)
+
+def clear_bank_balance(uid):
+    """(تلقائي) تصفير رصيد بنك الألعاب للعضو بعد السحب"""
+    global bank_db
+    with bank_lock:
+        if uid in bank_db:
+            bank_db[uid]["coins"] = 0
+            save_json(paths["bank"], bank_db)
+            print(f"Bank balance cleared for {uid}")
+
+# ------------------------------------------
+
+bot_context = {
+    "fetch_messages": fetch_messages,
+    "get_user_nickname": get_user_nickname,
+    "is_supervisor": is_supervisor,
+    "generate_tts_sync": generate_tts_sync,
+    "BASE_DIR": BASE_DIR,
+    "VOICE": VOICE,
+    "update_bank_balance": update_bank_balance, # <-- تمرير دالة بنك الألعاب
+}
+
 def process_message(m, sub, chat_obj):
+    global admins_db 
+    global prize_queue 
+    global bank_db # جلب المتغير العام
     try:
         mid = m.get("messageId")
         author = m.get("author") or {}
         if isinstance(author, dict):
             author_uid = author.get("uid")
+            author_nickname = author.get("nickname", "عضو")
         else:
             author_uid = getattr(author, "uid", None)
+            author_nickname = getattr(author, "nickname", "عضو")
+
 
         txt = m.get("content", "") or ""
         if not isinstance(txt, str):
@@ -1041,24 +903,11 @@ def process_message(m, sub, chat_obj):
         )
 
         if is_group_banned_status:
-            final_kick_msg = "تم الحظر الدائم من القروب" 
-            
-            kick_permanent_success = kick_user(sub, author_uid, chatId=chat_id, temporary=False)
-            
-            if kick_permanent_success:
-                mention_user_in_message(sub, chat_id, author_uid, final_kick_msg, replyTo=mid)
-            else:
-                kick_user(sub, author_uid, chatId=chat_id, temporary=True)
-                mention_user_in_message(sub, chat_id, author_uid, final_kick_msg + " (طرد احتياطي).", replyTo=mid)
-                
+            try:
+                delete_message(sub, mid, chatId=chat_id)
+            except Exception:
+                pass
             return
-
-        if is_local_banned(author_uid):
-            return
-
-        if last_message.get(chat_id) == mid:
-            return
-        last_message[chat_id] = mid
 
         exts = m.get("extensions", {}) or {}
         mentioned = False
@@ -1089,51 +938,55 @@ def process_message(m, sub, chat_obj):
             return
             
         if found_bad:
+            deletion_succeeded = False
             try:
-                delete_message(sub, mid, chatId=chat_id)
+                deletion_succeeded = delete_message(sub, mid, chatId=chat_id)
             except Exception:
-                pass
+                deletion_succeeded = False
             
-            if chat_id not in warnings_db:
-                warnings_db[chat_id] = {}
-            if author_uid not in warnings_db[chat_id]:
-                warnings_db[chat_id][author_uid] = {"count": 0, "last_bad": "", "status": None}
+            if deletion_succeeded:
+                if chat_id not in warnings_db:
+                    warnings_db[chat_id] = {}
+                if author_uid not in warnings_db[chat_id]:
+                    warnings_db[chat_id][author_uid] = {"count": 0, "last_bad": "", "status": None}
+                    
+                user_warns = warnings_db[chat_id][author_uid]
                 
-            user_warns = warnings_db[chat_id][author_uid]
-            
-            user_warns["count"] = user_warns.get("count", 0) + 1
-            user_warns["last_bad"] = found_bad
-                
-            warnings_db[chat_id][author_uid] = user_warns
-            save_json(paths["warnings"], warnings_db)
-            
-            if user_warns["count"] >= 4:
-                final_kick_msg = "ابلع طرد، انذرتك ثلاث مرات ولا سمعت. أنت محظور من العودة للقروب."
-                
-                success = kick_user(sub, author_uid, chatId=chat_id, temporary=False)
-                
-                warnings_db[chat_id][author_uid]["status"] = "group_banned"
+                user_warns["count"] = user_warns.get("count", 0) + 1
+                user_warns["last_bad"] = found_bad
+                    
+                warnings_db[chat_id][author_uid] = user_warns
                 save_json(paths["warnings"], warnings_db)
                 
-                if success:
-                    mention_user_in_message(sub, chat_id, author_uid, final_kick_msg, replyTo=mid)
-                else:
-                    kick_user(sub, author_uid, chatId=chat_id, temporary=True) 
-                    mention_user_in_message(sub, chat_id, author_uid, f"فشل الحظر الدائم! تم الطرد وتعيين حظر قروب دائم. {final_kick_msg}", replyTo=mid)
-            
-            elif user_warns["count"] >= 1 and user_warns["count"] <= 3:
-                warn_count = user_warns['count']
-                if warn_count == 1:
-                    warning_msg = f"ابلع إنذار أول، لا تسب بالقروب وتجيب العيد! (الإنذار 1/3)"
-                elif warn_count == 2:
-                    warning_msg = f"ابلع إنذار ثاني، قلت لك لا تسب! أحترم نفسك. (الإنذار 2/3)"
-                elif warn_count == 3:
-                    warning_msg = f"إنذار أخير (3/3)، المخالفة القادمة طرد نهائي من القروب!"
-                else:
-                    warning_msg = f"تحذير {warn_count}/3: راقب لغتك!"
+                if user_warns["count"] >= 4:
+                    success = kick_user(sub, author_uid, chatId=chat_id, temporary=False)
                     
-                mention_user_in_message(sub, chat_id, author_uid, warning_msg, replyTo=mid)
+                    warnings_db[chat_id][author_uid]["count"] = 0
+                    warnings_db[chat_id][author_uid].pop("status", None) 
+                    save_json(paths["warnings"], warnings_db)
+                    
+                    if not success:
+                        kick_user(sub, author_uid, chatId=chat_id, temporary=True) 
+                
+                elif user_warns["count"] >= 1 and user_warns["count"] <= 3:
+                    warn_count = user_warns['count']
+                    if warn_count == 1:
+                        warning_msg = f"ابلع إنذار أول، لا تسب بالقروب وتجيب العيد! (الإنذار 1/3)"
+                    elif warn_count == 2:
+                        warning_msg = f"ابلع إنذار ثاني، قلت لك لا تسب! أحترم نفسك. (الإنذار 2/3)"
+                    elif warn_count == 3:
+                        warning_msg = f"إنذار أخير (3/3)، المخالفة القادمة طرد نهائي من القروب!"
+                    else:
+                        warning_msg = f"تحذير {warn_count}/3: راقب لغتك!"
+                        
+                    mention_user_in_message(sub, chat_id, author_uid, warning_msg, replyTo=mid)
+            
+            else:
+                safe_send(sub, chat_id, "عيب تسب ماني كو ولا كان لقمتك", replyTo=mid)
 
+            return
+        
+        if is_local_banned(author_uid):
             return
 
         poli_words = ["سياسة", "انتخابات", "رئيس", "حكومة", "حزبي", "حزب", "انتخاب", "برلمان", "قانون الانتخاب", "سياسي"]
@@ -1148,71 +1001,366 @@ def process_message(m, sub, chat_obj):
             except:
                 pass
             return
-
-        if handle_text_mentioning_dev(txt, sub, chat_id, mid):
+        
+        # --- متغيرات الأوامر النصية ---
+        txt_str = txt
+        txt_lower = txt.strip().lower()
+        txt_strip = txt.strip()
+            
+        if games.handle_game_command(sub, txt_lower, author_uid, chat_id, mid, BOT_NAME_AR, bot_context):
             return
+
+        # --- أمر !بنكي (الجديد) ---
+        if txt_strip == "!بنكي":
+            user_balance = get_bank_balance(author_uid)
             
-        if handle_game_command(sub, txt.strip().lower(), author_uid, chat_id, mid, BOT_NAME_AR):
-            return
-
-
-        author_is_supervisor = is_supervisor(author_uid)
-
-        if (author_uid == DEV_UID) or author_is_supervisor:
-            
-            
-            if isinstance(txt, str) and txt.startswith(("!معلومات", "معلومات العضو")):
-                mentioned_list = exts.get("mentionedArray", [])
-                user_link_match = re.search(r'(http://aminoapps\.com/p/[a-zA-Z0-9]+)', txt)
-                
-                target_uid = None
-                
-                if mentioned_list:
-                    target_uid = mentioned_list[0].get("uid")
-                elif user_link_match:
-                    link = user_link_match.group(0)
-                    try:
-                        obj = client.get_from_code(link)
-                        target_uid = getattr(obj, "objectId", None)
-                    except:
-                        pass
-                
-                if not target_uid:
-                    safe_send(sub, chat_id, "❌ لتنفيذ الأمر، يجب عمل منشن (Tag) للعضو أو إرسال رابط بروفايله.", replyTo=mid)
-                    return
-                
-                try:
-                    profile = client.get_user_info(userId=target_uid)
-                    info = profile.get('userProfile', {})
-                    
-                    nickname = info.get("nickname", "N/A")
-                    level = info.get("level", 0)
-                    reputation = info.get("reputation", 0)
-                    
-                    created_time_str = info.get("createdTime")
-                    join_date = "N/A"
-                    if created_time_str:
-                         try:
-                            join_date = created_time_str.split('T')[0] 
-                         except:
-                            join_date = created_time_str 
-
-                    message = f"""[BC]👤 معلومات العضو ({nickname}):
+            if user_balance > 0:
+                bank_msg = f"""[BC]🏦 بنك رايس 🏦
 [C]-----------------------
-[C] معرف العضو (UID): {target_uid}
-[C] المستوى (Level): {level}
-[C] السمعة (Reputation): {reputation}
-[C] تاريخ الانضمام: {join_date}
-[C] رابط البروفايل: http://aminoapps.com/p/{target_uid}
-[C]-----------------------"""
-                    safe_send(sub, chat_id, message, replyTo=mid)
-                except Exception as e:
-                    safe_send(sub, chat_id, f"❌ فشل جلب معلومات العضو. (الخطأ: {e})", replyTo=mid)
+[C]👤 العضو: {author_nickname}
+[C]🆔 الآي دي: {author_uid}
+[C]💰 الرصيد الحالي: {user_balance} قروش
+[C]-----------------------
+[C]لسحب أرباحك، اكتب:
+[C]سحب قروشي <رابط منشورك>"""
+            else:
+                bank_msg = "ليس لديك أرباح — العب لتربح"
+            
+            safe_send(sub, chat_id, bank_msg, replyTo=mid)
+            return
 
+        # --- أمر سحب القروش (الجديد) ---
+        if txt_lower.startswith("سحب قروشي"):
+            user_balance = get_bank_balance(author_uid)
+            
+            if user_balance <= 0:
+                safe_send(sub, chat_id, "ليس لديك ارباح لسحبها", replyTo=mid)
+                return
+
+            user_link_match = re.search(r'(http://aminoapps\.com/p/[a-zA-Z0-9]+)', txt)
+            if not user_link_match:
+                safe_send(sub, chat_id, "❌ يرجى إرفاق رابط منشور أو ويكي لسحب القروش.", replyTo=mid)
                 return
             
-            if isinstance(txt, str) and txt.startswith(("عفو عن", "العفو عن")):
+            link = user_link_match.group(0)
+            target_blog_id = None
+            target_wiki_id = None
+            
+            try:
+                obj = client.get_from_code(link)
+                if obj.objectType == 1: # Blog
+                    target_blog_id = obj.objectId
+                elif obj.objectType == 3: # Wiki
+                    target_wiki_id = obj.objectId
+                else:
+                    safe_send(sub, chat_id, "❌ الرابط غير صالح. يرجى إرسال رابط منشور أو ويكي.", replyTo=mid)
+                    return
+            except Exception as e:
+                safe_send(sub, chat_id, f"❌ فشل التعرف على الرابط: {e}", replyTo=mid)
+                return
+
+            try:
+                if target_blog_id:
+                    sub.send_coins(blogId=target_blog_id, coins=user_balance)
+                elif target_wiki_id:
+                    sub.send_coins(wikiId=target_wiki_id, coins=user_balance)
                 
+                # نجح الإرسال، قم بتصفير الرصيد
+                clear_bank_balance(author_uid)
+                safe_send(sub, chat_id, f"✅ تم ارسال قروشك بالكامل ({user_balance} قرش). عدد قروشك الأن 0", replyTo=mid)
+
+            except Exception as e:
+                safe_send(sub, chat_id, f"❌ فشل إرسال القروش. تأكد من أن الرابط صحيح وأنني أمتلك قروشًا كافية. الخطأ: {e}", replyTo=mid)
+            
+            return
+
+        if isinstance(txt, str) and txt.startswith("معلومات"):
+            mentioned_list = exts.get("mentionedArray", [])
+            user_link_match = re.search(r'(http://aminoapps\.com/p/[a-zA-Z0-9]+)', txt)
+            
+            target_uid = None
+            
+            if mentioned_list:
+                target_uid = mentioned_list[0].get("uid")
+            elif user_link_match:
+                link = user_link_match.group(0)
+                try:
+                    obj = client.get_from_code(link)
+                    target_uid = getattr(obj, "objectId", None)
+                except:
+                    pass
+            
+            if not target_uid:
+                safe_send(sub, chat_id, "❌ لتنفيذ الأمر، يجب عمل منشن (Tag) للعضو أو إرسال رابط بروفايله.", replyTo=mid)
+                return
+            
+            try:
+                com_profile_raw = sub.get_user_info(target_uid)
+                glob_profile_raw = client.get_user_info(target_uid)
+
+                if not isinstance(com_profile_raw, dict):
+                    com_profile = com_profile_raw.__dict__
+                else:
+                    com_profile = com_profile_raw.get('userProfile', com_profile_raw)
+                
+                if not isinstance(glob_profile_raw, dict):
+                    glob_profile = glob_profile_raw.__dict__
+                else:
+                    glob_profile = glob_profile_raw.get('userProfile', glob_profile_raw)
+
+
+                nickname = com_profile.get("nickname", "N/A")
+                level = com_profile.get("level", "N/A")
+                reputation = com_profile.get("reputation", "N/A")
+                
+                created_time_str = com_profile.get("createdTime", "N/A")
+                join_date = "N/A"
+                if created_time_str != "N/A":
+                     try:
+                        join_date = created_time_str.split('T')[0]
+                     except:
+                        join_date = created_time_str 
+                
+                com_followers = com_profile.get("followersCount", "N/A")
+                com_following = com_profile.get("followingCount", "N/A")
+                com_posts = com_profile.get("postsCount", "N/A")
+                com_wikis = com_profile.get("wikiCount", "N/A")
+                com_wall_comments = com_profile.get("commentsCount", "N/A")
+                
+
+                glob_followers = glob_profile.get("followersCount", "N/A")
+                glob_following = glob_profile.get("followingCount", "N/A")
+                glob_posts = glob_profile.get("postsCount", "N/A")
+                glob_wall_comments = glob_profile.get("commentsCount", "N/A")
+
+
+                message = f"""[BC]— ملف العضو: {nickname} —
+
+[C]المستوى: {level}
+[C]السمعة: {reputation}
+[C]تاريخ الانضمام: {join_date}
+[C]UID: {target_uid}
+
+[C]— إحصائيات المنتدى —
+[C]المتابعون: {com_followers}
+[C]يُتابِع: {com_following}
+[C]المنشورات: {com_posts}
+[C]تعليقات الحائط: {com_wall_comments}
+
+[C]— إحصائيات عالمية —
+[C]المتابعون (عام): {glob_followers}
+[C]يُتابِع (عام): {glob_following}
+[C]المنشورات (عام): {glob_posts}
+[C]تعليقات الحائط (عام): {glob_wall_comments}"""
+                safe_send(sub, chat_id, message, replyTo=mid)
+            
+            except Exception as e:
+                print(f"Error in 'معلومات' command for UID {target_uid}: {e}") 
+                safe_send(sub, chat_id, "❌ فشل جلب معلومات العضو. قد يكون هناك خطأ في الخادم. حاول مرة أخرى.", replyTo=mid)
+
+            return
+            
+        if isinstance(txt, str) and txt.strip() in ("قائمة المشرفين", "قائمة_المشرفين", "مشرفين"):
+            
+            if not isinstance(admins_db, dict) or not admins_db:
+                safe_send(sub, chat_id, "ما عندنا مشرفين حالياً.", replyTo=mid)
+                return
+                
+            out_lines = ["[BC]المعلمين (مشرفي البوت) هم:"]
+            for uid, info in admins_db.items():
+                nickname = info.get("nickname") or "اسم غير متوفر" 
+                link = info.get("link", "")          
+                
+                out_lines.append(f"[C]- {nickname}")
+                if link:
+                    out_lines.append(f"[C]{link}")
+
+            safe_send(sub, chat_id, "\n".join(out_lines), replyTo=mid)
+            return
+            
+        if isinstance(txt, str) and txt.strip() == "انضمام":
+            join_message = """[BC]لأنضمام البوت الى قروبك:🤖
+[C]ضع رابطها هنا: http://aminoapps.com/p/v1dtcyg"""
+            safe_send(sub, chat_id, join_message, replyTo=mid)
+            return
+
+        if isinstance(txt, str) and txt.strip() in ("المطور", "مطور البوت"):
+            mention_user_in_message(sub, chat_id, DEV_UID, f"هذا هو المطور: {DEV_LINK}", replyTo=mid)
+            return
+            
+        if isinstance(txt, str) and txt.strip() in ("الأوامر", "القائمة","قائمة","الاوامر"):
+            
+            menu = """[BC]🤖 BOT Raise - قائمة الأوامر 🤖
+[C]---------------------------------------          
+[BC]أوامر الأعضاء👫
+[C]---------------------------------------
+[C][اكتب معلومات@منشن/رابط](لعرض معلومات العضو)ℹ️
+[C]🎮 [ العاب ] (لعرض قائمة الألعاب)
+[C]🏦 [ !بنكي ] (لعرض رصيد أرباحك من الألعاب)
+[C]💸 [ سحب قروشي <رابط> ] (لسحب أرباح الألعاب)
+[C]🔄 [ انضمام ] ( لرؤية طريقة إضافة البوت لقروبك)
+[C]🔰 [ مشرفين ] (لعرض مشرفي البوت)
+[C] 👑 (المطور او مطور البوت) [ لظهور رابط حساب المطور ]
+[BC]أوامر مشرفي البوت🔰
+[C]---------------------------------------
+[C] 💰 [ kroh <العدد> قروب ] (إرسال قروش للقروب)
+[C] 💰 [ kroh <العدد> <رابط منشور> ] (إرسال قروش للمنشور)
+[C] 🎁 [ !دعم المستحقين ] (إرسال الجوائز اليدوية العالقة)
+[C] 🔨 [ Blok <منشن/رابط> ] (للحذف التلقائي)
+[C]🔓 [ Blok A <منشن/رابط> ] (لإلغاء الحذف التلقائي)
+[C] 📌 [ !رفع اعلان: >نص ] (لتعيين إعلان للقروب)
+[C] 📌 [ !رفع اعلان ] (برد على رسالة لتعيينها إعلان)
+[C] 🗑️ [ !احذف الإعلان ] (لمسح الإعلان المثبت)
+[C] 🔒 [ !اطلاع ] (تفعيل وضع القراءة فقط)
+[C] ✅ [ !فتح ] (إلغاء وضع الاطلاع)
+[C] 🗑️ [ !حذف ] (مع رد لحذف رسالة)
+[C] 🔕 [ K1/K2/K3 <منشن> ] (لكتم العضو)
+[C] 📢 [ KA <منشن> ] (لإلغاء الكتم)
+[C] 🏃 [ Tar1/Tae2 <منشن> ] (طرد مؤقت أو نهائي)
+[C] 📜 [ قائمة القروبات ] (لعرض القروبات المراقبة)
+[C] ✈️ [ Tar raes <منشن> ] (طرد العضو من جميع القروبات)
+[BC]أوامر المطور👑 
+[C]---------------------------------------
+[C] 📣 [ منشن ] (لمناداة الجميع)
+[C] 🔰 [ Ahr <منشن> ] (لإعطاء إشراف بوت)
+[C] 📉 [ Tn Ahr <منشن> ] (لإزالة إشراف بوت)
+[C] ➕ [ اضف قروب <رابط> ] (لمراقبة قروب جديد)
+[C] ➖ [ ازالة قروب <رابط> ] (لإلغاء مراقبة قروب)"""
+            safe_send(sub, chat_id, menu, replyTo=mid)
+            return
+
+        author_is_supervisor = is_supervisor(author_uid)
+        author_is_dev = (author_uid == DEV_UID)
+        author_is_supervisor_or_dev = author_is_supervisor or author_is_dev
+        
+        author_has_chat_power = author_is_supervisor_or_dev
+        
+        if author_has_chat_power:
+            
+            # --- أوامر القروش والجوائز (اليدوية) ---
+            if txt_strip == "!دعم المستحقين":
+                safe_send(sub, chat_id, "🔁 جاري محاولة دعم المستحقين (القائمة اليدوية) في الخلفية...", replyTo=mid)
+                threading.Thread(target=process_prize_queue, args=(sub, chat_id), daemon=True).start()
+                return
+
+            # --- !!! تعديل أمر kroh !!! ---
+            if txt_lower.startswith("kroh") or txt_lower.startswith("hroh"):
+                try:
+                    parts = txt.split()
+                    if len(parts) < 2:
+                        raise ValueError("Invalid format")
+                    
+                    amount_str = re.sub(r'\D', '', parts[1])
+                    if not amount_str: 
+                        amount_str = re.sub(r'\D', '', parts[0])
+                    amount = int(amount_str)
+                    
+                    if amount <= 0:
+                        raise ValueError("Invalid amount")
+
+                    # تمت إزالة target_uid
+                    target_blog_id = None
+                    target_wiki_id = None 
+                    target_chat_id = None
+
+                    # تمت إزالة mentioned_list و user_ndc_match
+                    user_link_match = re.search(r'(http://aminoapps\.com/p/[a-zA-Z0-9]+)', txt)
+
+                    if user_link_match:
+                        link = user_link_match.group(0)
+                        try:
+                            obj = client.get_from_code(link)
+                            if obj.objectType == 1: # Blog
+                                target_blog_id = obj.objectId
+                            elif obj.objectType == 3: # Wiki
+                                target_wiki_id = obj.objectId
+                            # تم حذف الشرط الخاص بـ obj.objectType == 0 (User)
+                            elif obj.objectType == 12: # Chat
+                                target_chat_id = obj.objectId
+                        except:
+                            pass 
+                    
+                    if "قروب" in txt_lower:
+                        target_chat_id = chat_id
+                    elif not target_blog_id and not target_wiki_id and not target_chat_id:
+                        # الافتراضي هو القروب إذا لم يتم تحديد رابط
+                        target_chat_id = chat_id
+                    
+                    # --- تنفيذ الإرسال ---
+                    if target_blog_id:
+                        sub.send_coins(blogId=target_blog_id, coins=amount)
+                        safe_send(sub, chat_id, f"✅ تم إرسال {amount} قرش إلى المنشور.", replyTo=mid)
+                    elif target_wiki_id:
+                        sub.send_coins(wikiId=target_wiki_id, coins=amount)
+                        safe_send(sub, chat_id, f"✅ تم إرسال {amount} قرش إلى الويكي.", replyTo=mid)
+                    
+                    # تم حذف الشرط الخاص بـ target_uid
+                    
+                    elif target_chat_id:
+                        sub.send_coins(chatId=target_chat_id, coins=amount)
+                        safe_send(sub, chat_id, f"✅ تم إرسال {amount} قرش إلى هذا القروب.", replyTo=mid)
+                    else:
+                        safe_send(sub, chat_id, "❌ لم أستطع تحديد الهدف (رابط منشور/ويكي، أو 'قروب').", replyTo=mid)
+
+                except ValueError:
+                    safe_send(sub, chat_id, "❌ صيغة خاطئة. استخدم: `kroh <العدد> [رابط/قروب]`", replyTo=mid)
+                except Exception as e:
+                    safe_send(sub, chat_id, f"❌ فشل إرسال القروش: {e}", replyTo=mid)
+                return
+            # --- نهاية أوامر القروش ---
+
+            if txt_strip in ("!فتح_الدردشة", "!فتح"):
+                done = False
+                try:
+                    sub.edit_chat(chatId=chat_id, viewOnly=False)
+                    done = True
+                except Exception as e:
+                    print(f"Error opening chat (viewOnly=False): {e}")
+                    pass
+                safe_send(sub, chat_id, "✅ تم فتح الدردشة (إلغاء وضع الاطلاع)." if done else "❌ فشل فتح الدردشة. تأكد من صلاحياتي.", replyTo=mid)
+                return
+
+            if txt_strip == "!اطلاع":
+                done = False
+                err_str = "" 
+                try:
+                    sub.edit_chat(chatId=chat_id, viewOnly=True)
+                    done = True
+                except Exception as e:
+                    print(f"Error setting viewOnly=True: {e}")
+                    err_str = str(e) 
+                    pass
+                
+                if "Connection reset by peer" in err_str or "104" in err_str:
+                    done = True 
+                
+                safe_send(sub, chat_id, "✅ تم تفعيل وضع الاطلاع (القراءة فقط)." if done else "❌ فشل تفعيل وضع الاطلاع. تأكد من صلاحياتي.", replyTo=mid)
+                return
+
+            if txt_strip == "!حذف":
+                try:
+                    reply_msg = exts.get("replyMessage")
+                    target_mid = reply_msg.get("messageId") if isinstance(reply_msg, dict) else None
+                    if target_mid and delete_message(sub, target_mid, chatId=chat_id):
+                        safe_send(sub, chat_id, "✅ حذفت الرسالة عشانك.", replyTo=mid)
+                    else:
+                        safe_send(sub, chat_id, "❌ رد على رسالة عشان أحذفها.", replyTo=mid)
+                except Exception as e:
+                    safe_send(sub, chat_id, f"خطأ بالحذف: {e}", replyTo=mid)
+                return
+
+            if txt_strip in ("!أزل الإعلان", "!احذف الإعلان"):
+                done = False
+                try:
+                    sub.edit_chat(chatId=chat_id, announcement="", pinAnnouncement=False)
+                    done = True
+                except Exception as e:
+                    print(f"Error removing announcement: {e}")
+                    pass
+                safe_send(sub, chat_id, "✅ تم حذف الإعلان وفك تثبيته." if done else "❌ فشل حذف الإعلان. تأكد من صلاحياتي.", replyTo=mid)
+                return
+
+            if txt_lower.startswith("blok a"):
                 mentioned_list = exts.get("mentionedArray", [])
                 user_link_match = re.search(r'(http://aminoapps\.com/p/[a-zA-Z0-9]+)', txt)
                 
@@ -1246,14 +1394,14 @@ def process_message(m, sub, chat_obj):
                     except:
                         pass
                         
-                    mention_user_in_message(sub, chat_id, target_uid, "تم العفو عنه يقدر يدخل القروب الأن..", replyTo=mid)
+                    mention_user_in_message(sub, chat_id, target_uid, "تم العفو عنه وإلغاء حذف الرسائل.", replyTo=mid)
                     
                 else:
-                    safe_send(sub, chat_id, "❌ العضو ليس محظوراً على مستوى هذا القروب.", replyTo=mid)
+                    safe_send(sub, chat_id, "❌ العضو ليس لديه حالة حذف تلقائي.", replyTo=mid)
                 return
 
             
-            if isinstance(txt, str) and txt.startswith(("حظر قروب", "حظر_قروب")):
+            if txt_lower.startswith("blok") and not txt_lower.startswith("blok a"):
                 mentioned_list = exts.get("mentionedArray", [])
                 user_link_match = re.search(r'(http://aminoapps\.com/p/[a-zA-Z0-9]+)', txt)
                 
@@ -1275,91 +1423,136 @@ def process_message(m, sub, chat_obj):
                 
                 if check_command_protection(author_uid, target_uid, chat_id, mid, sub): return
 
-                final_kick_msg = "تم الحظر الدائم من القروب" 
-                
-                ok = kick_user(sub, target_uid, chatId=chat_id, temporary=False) 
+                final_msg = "تم تفعيل الحذف التلقائي لرسائل العضو."
                 
                 if chat_id not in warnings_db: warnings_db[chat_id] = {}
                 if target_uid not in warnings_db[chat_id]: warnings_db[chat_id][target_uid] = {"count": 0, "last_bad": "", "status": None}
                 warnings_db[chat_id][target_uid]["status"] = "group_banned"
                 save_json(paths["warnings"], warnings_db)
                 
-                if ok:
-                    mention_user_in_message(sub, chat_id, target_uid, final_kick_msg, replyTo=mid)
-                else:
-                    kick_user(sub, target_uid, chatId=chat_id, temporary=True)
-                    mention_user_in_message(sub, chat_id, target_uid, f"✅ تم الطرد وحفظ حالة الحظر الدائم في القروب. {final_kick_msg}", replyTo=mid)
+                mention_user_in_message(sub, chat_id, target_uid, final_msg, replyTo=mid)
 
                 return
 
-            if isinstance(txt, str) and re.match(r"^!?(كتم|حظر محلي)[123]?\b", txt):
-                parts = txt.split()
-                code = None
-                m0 = re.match(r"^!?(كتم|حظر محلي)([123])\b", txt)
-                if m0:
-                    code = m0.group(2)
-                elif len(parts) >= 2 and parts[-1] in ("1", "2", "3"):
-                    code = parts[-1]
-
-                mentioned_list = exts.get("mentionedArray", [])
+            if "!رفع اعلان" in txt_str or "!تعديل اعلان" in txt_str:
+                announcement_text = None
                 
-                if not mentioned_list:
-                    safe_send(sub, chat_id, "❌ منشن المستخدم يا معلم عشان أقدر أشتغل.", replyTo=mid)
-                else:
-                    if code is None: code = "3"
+                if txt_str.startswith("!رفع اعلان:") or txt_str.startswith("!تعديل اعلان:"):
+                    announcement_text = txt_str.split(":", 1)[-1].strip()
+                
+                elif txt_strip == "!رفع اعلان" or txt_strip == "!تعديل اعلان":
+                    reply_msg = exts.get("replyMessage")
+                    if isinstance(reply_msg, dict):
+                        announcement_text = reply_msg.get("content")
+                
+                if announcement_text:
+                    done = False
+                    try:
+                        sub.edit_chat(chatId=chat_id, announcement=announcement_text, pinAnnouncement=True)
+                        done = True
+                    except Exception as e:
+                        print(f"Error setting announcement: {e}")
+                        safe_send(sub, chat_id, f"❌ فشل رفع الإعلان. تأكد من صلاحياتي. (الخطأ: {e})", replyTo=mid)
+                        return
                     
-                    for u in mentioned_list:
-                        uid = u.get("uid")
-                        if not uid: continue
-                        
-                        if check_command_protection(author_uid, uid, chat_id, mid, sub): continue
+                    if done:
+                        safe_send(sub, chat_id, "✅ تم رفع الإعلان وتثبيته.", replyTo=mid)
+                    else:
+                        safe_send(sub, chat_id, "❌ فشل رفع الإعلان. تأكد من صلاحياتي.", replyTo=mid)
+                else:
+                    safe_send(sub, chat_id, "❌ لاستخدام الأمر:\n- `!رفع اعلان: النص هنا`\n- أو رد على رسالة واكتب `!رفع اعلان`", replyTo=mid)
+                return
+        
+        if author_is_supervisor_or_dev:
+            
+            mentioned_list_k = exts.get("mentionedArray", [])
+            if mentioned_list_k and (txt_lower.startswith("k1") or txt_lower.startswith("k2") or txt_lower.startswith("k3")):
+                uid_to_mute = mentioned_list_k[0].get("uid")
+                if not uid_to_mute: return
 
-                        if code == "1":
-                            add_local_ban(uid, 3600)
-                            safe_send(sub, chat_id, "تم الكتم لن أرد عليه لمده ساعة", replyTo=mid)
-                        elif code == "2":
-                            add_local_ban(uid, 86400)
-                            safe_send(sub, chat_id, "تم الكتم لمدة لمدة 24 ساعة", replyTo=mid)
-                        elif code == "3":
-                            add_local_ban(uid, None)
-                            safe_send(sub, chat_id, "تم الكتم لن أرد عليه للأبد", replyTo=mid)
+                if check_command_protection(author_uid, uid_to_mute, chat_id, mid, sub): return
+
+                if txt_lower.startswith("k1"):
+                    add_local_ban(uid_to_mute, 3600)
+                    safe_send(sub, chat_id, "تم الكتم لن أرد عليه لمده ساعة", replyTo=mid)
+                elif txt_lower.startswith("k2"):
+                    add_local_ban(uid_to_mute, 86400)
+                    safe_send(sub, chat_id, "تم الكتم لمدة لمدة 24 ساعة", replyTo=mid)
+                elif txt_lower.startswith("k3"):
+                    add_local_ban(uid_to_mute, None)
+                    safe_send(sub, chat_id, "تم الكتم لن أرد عليه للأبد", replyTo=mid)
                 return
 
             
-            if isinstance(txt, str) and txt.strip() in ("فك الكتم", "فك الحظر", "!فك الكتم", "!فك الحظر") or txt.startswith(("!فك_الكتم", "فك_الحظر", "!فك_الحظر")):
-                mentioned_list = exts.get("mentionedArray", [])
-                user_link_match = re.search(r'(http://aminoapps\.com/p/[a-zA-Z0-9]+)', txt)
+            mentioned_list_ka = exts.get("mentionedArray", [])
+            if mentioned_list_ka and txt_lower.startswith("ka"):
+                uid_to_unmute = mentioned_list_ka[0].get("uid")
+                if not uid_to_unmute: return
 
-                target_uids = []
-                if mentioned_list:
-                    target_uids.extend([u.get("uid") for u in mentioned_list if u.get("uid")])
-                elif user_link_match:
-                    link = user_link_match.group(0)
-                    try:
-                        obj = client.get_from_code(link)
-                        target_uids.append(getattr(obj, "objectId", None))
-                    except:
-                        pass
+                if check_command_protection(author_uid, uid_to_unmute, chat_id, mid, sub): return
                 
-                if not target_uids:
-                    safe_send(sub, chat_id, "❌ يرجى عمل منشن (Tag) للعضو أو إرسال رابطه لفك الكتم عنه.", replyTo=mid)
-                    return
-
-                success_count = 0
-                for uid in target_uids:
-                    if not uid: continue
-                    if check_command_protection(author_uid, uid, chat_id, mid, sub): continue
-
-                    if remove_local_ban(uid): 
-                        success_count += 1
-
-                if success_count > 0:
-                    safe_send(sub, chat_id, f"✅ تم فك **الكتم** عن {success_count} عضو، عطوهم فرصة ثانية.", replyTo=mid)
-                else:
-                    safe_send(sub, chat_id, "❌ لم يتم العثور على أي من الأعضاء المذكورين في قائمة الكتم المحلي.", replyTo=mid)
+                remove_local_ban(uid_to_unmute)
+                safe_send(sub, chat_id, "تم فك الكتم عنه برد علية الأن.", replyTo=mid)
                 return
 
-            if author_uid == DEV_UID and isinstance(txt, str) and txt.startswith(("ترقيه إشراف", "ترقية إشراف")):
+            mentioned_list_t = exts.get("mentionedArray", [])
+            if mentioned_list_t and (txt_lower.startswith("tar1") or txt_lower.startswith("tae2")):
+                uid_to_kick = mentioned_list_t[0].get("uid")
+                if not uid_to_kick: return
+
+                if check_command_protection(author_uid, uid_to_kick, chat_id, mid, sub): return
+                
+                try:
+                    if txt_lower.startswith("tar1"):
+                        ok = kick_user(sub, uid_to_kick, chatId=chat_id, temporary=True)
+                        safe_send(sub, chat_id, "تم الطرد المؤقت." if ok else "فشل الطرد.", replyTo=mid)
+                    
+                    elif txt_lower.startswith("tae2"):
+                        ok = kick_user(sub, uid_to_kick, chatId=chat_id, temporary=False)
+                        
+                        if ok:
+                            safe_send(sub, chat_id, "تم الطرد النهائي من القروب", replyTo=mid)
+                        else:
+                            ok2 = kick_user(sub, uid_to_kick, chatId=chat_id, temporary=True)
+                            if ok2:
+                                safe_send(sub, chat_id, "فشل الطرد النهائي، تم الطرد المؤقت بدلاً عنه.", replyTo=mid)
+                            else:
+                                safe_send(sub, chat_id, "فشل الطرد.", replyTo=mid)
+                except Exception as e:
+                    safe_send(sub, chat_id, f"فشل الطرد: {e}", replyTo=mid)
+                return
+
+            mentioned_list_tr = exts.get("mentionedArray", [])
+            if mentioned_list_tr and txt_lower.startswith("tar raes"):
+                target_uid = mentioned_list_tr[0].get("uid")
+                if not target_uid:
+                    safe_send(sub, chat_id, "❌ لم أجد العضو.", replyTo=mid)
+                    return
+
+                if check_command_protection(author_uid, target_uid, chat_id, mid, sub): return
+
+                safe_send(sub, chat_id, f"🔁 جاري تنفيذ الطرد العام للعضو... قد يستغرق هذا بعض الوقت.", replyTo=mid)
+
+                def global_kick_thread(uid, reply_chat_id, reply_mid):
+                    kicked, failed = kick_user_from_all_chats(uid)
+                    safe_send(sub, reply_chat_id, f"✅ اكتمل الطرد العام:\n- تم الطرد من {len(kicked)} قروب.\n- فشل الطرد في {len(failed)} قروب (قد لا أملك صلاحيات).", replyTo=reply_mid)
+                
+                threading.Thread(target=global_kick_thread, args=(target_uid, chat_id, mid), daemon=True).start()
+                return
+
+            if txt_strip in ("قائمة القروبات", "قروبات", "قائمة_القروبات"):
+                gl = monitored_groups
+                safe_send(sub, chat_id, "القروبات اللي أراقبها:\n" + ("\n".join(gl) if gl else "ما أراقب ولا قروب حالياً."), replyTo=mid)
+                return
+
+        if author_is_dev:
+            if txt_strip in ("منشن", "منشن_الكل"):
+                ok = mention_everyone_in_chat(sub, chat_id, replyTo=mid, message_text="يا جماعة الخير، أحد المشرفين يبغاكم.")
+                if not ok:
+                    safe_send(sub, chat_id, "فشل المنشن أو العدد قليل.", replyTo=mid)
+                return
+
+            if txt_str.lower().startswith("ahr"):
                 mentioned_list = exts.get("mentionedArray", [])
                 if not mentioned_list:
                     safe_send(sub, chat_id, "❌ منشن المستخدم يا مطوري العزيز.", replyTo=mid)
@@ -1367,19 +1560,24 @@ def process_message(m, sub, chat_obj):
                     for u in mentioned_list:
                         uid = u.get("uid")
                         if uid:
-                            if isinstance(admins_db, dict):
-                                admins_db[uid] = True
-                            elif isinstance(admins_db, list) and uid not in admins_db:
-                                admins_db.append(uid)
+                            nickname = u.get("nickname", uid)
+                            if not isinstance(admins_db, dict):
+                                admins_db = {}
+                            
+                            admins_db[uid] = {
+                                "nickname": nickname,
+                                "link": "" 
+                            }
                             save_json(paths["admins"], admins_db)
+                            
                             try:
                                 sub.promote(userId=uid)
                             except:
                                 pass
-                            safe_send(sub, chat_id, "✅ مبروك تمت ترقيته إشراف، صار معلم.", replyTo=mid)
+                            safe_send(sub, chat_id, f"✅ مبروك تمت ترقيته إشراف، صار معلم.\n[C]الاسم: {nickname}\n[C]الرابط: \"\" (أضف الرابط يدويًا في مشرفين.json)", replyTo=mid)
                 return
 
-            if isinstance(txt, str) and txt.startswith(("ازاله إشراف", "إزالة إشراف")):
+            if txt_str.lower().startswith("tn ahr"):
                 mentioned_list = exts.get("mentionedArray", [])
                 if not mentioned_list:
                     safe_send(sub, chat_id, "❌ منشن المستخدم اللي تبي تنزله من الإشراف.", replyTo=mid)
@@ -1390,8 +1588,7 @@ def process_message(m, sub, chat_obj):
                             if check_command_protection(author_uid, uid, chat_id, mid, sub): return
                             if isinstance(admins_db, dict):
                                 admins_db.pop(uid, None)
-                            elif isinstance(admins_db, list) and uid in admins_db:
-                                admins_db.remove(uid)
+                            
                             save_json(paths["admins"], admins_db)
                             try:
                                 sub.demote(userId=uid)
@@ -1400,145 +1597,7 @@ def process_message(m, sub, chat_obj):
                             safe_send(sub, chat_id, "✅ تمت إزالة الإشراف، بطلنا منه.", replyTo=mid)
                 return
 
-            if isinstance(txt, str) and re.match(r"^طرد[12]?\b", txt):
-                parts = txt.split()
-                kick_type = None
-                m0 = re.match(r"^طرد([12])\b", txt)
-                if m0:
-                    kick_type = m0.group(1)
-                elif len(parts) >= 2 and parts[-1] in ("1", "2"):
-                    kick_type = parts[-1]
-                
-                if kick_type is None:
-                    kick_type = "1" 
-
-                mentioned_list = exts.get("mentionedArray", [])
-                if not mentioned_list:
-                    safe_send(sub, chat_id, "❌ منشن المستخدم اللي تبي تطرده، وش تنتظر؟", replyTo=mid)
-                else:
-                    for u in mentioned_list:
-                        uid = u.get("uid")
-                        if not uid: continue
-                        
-                        if check_command_protection(author_uid, uid, chat_id, mid, sub): return
-                        
-                        try:
-                            if kick_type == "1":
-                                ok = kick_user(sub, uid, chatId=chat_id, temporary=True)
-                                safe_send(sub, chat_id, "تم الطرد" if ok else "فشل الطرد العادي.", replyTo=mid)
-                            
-                            elif kick_type == "2":
-                                ok = kick_user(sub, uid, chatId=chat_id, temporary=False)
-                                
-                                if ok:
-                                    safe_send(sub, chat_id, "تم الطرد", replyTo=mid)
-                                else:
-                                    ok2 = kick_user(sub, uid, chatId=chat_id, temporary=True)
-                                    
-                                    if chat_id not in warnings_db: warnings_db[chat_id] = {}
-                                    if uid not in warnings_db[chat_id]: warnings_db[chat_id][uid] = {"count": 0, "last_bad": "", "status": None}
-                                    warnings_db[chat_id][uid]["status"] = "group_banned"
-                                    save_json(paths["warnings"], warnings_db)
-                                    
-                                    if ok2:
-                                        safe_send(sub, chat_id, "تم الطرد", replyTo=mid)
-                                    else:
-                                        safe_send(sub, chat_id, "فشل الطرد: تم حفظ حظر قروب دائم.", replyTo=mid)
-                        except Exception as e:
-                            safe_send(sub, chat_id, f"فشل الطرد: {e}", replyTo=mid)
-                return
-
-            if isinstance(txt, str) and txt in ("!عرض", "!عرض_فقط", "إطلاع القروب"):
-                done = False
-                error_detail = ""
-                
-                try:
-                    sub.update_chat(chatId=chat_id, content="view_only") 
-                    done = True
-                except Exception as e:
-                    error_detail = f"فشل المحاولة 1: {e}"
-                    
-                if not done:
-                    try:
-                        sub.set_chat_permission(chatId=chat_id, permission="view_only")
-                        done = True
-                    except Exception as e:
-                        error_detail = f"فشل المحاولة 2: {e}"
-
-                if not done:
-                    try:
-                        sub.set_permissions(chatId=chat_id, permissions={"sendMessage": False})
-                        done = True
-                    except Exception as e:
-                        error_detail = f"فشل المحاولة 3: {e}"
-
-
-                if done:
-                    safe_send(sub, chat_id, "✅ تم تفعيل وضع العرض فقط. الكل يسكت.", replyTo=mid)
-                else:
-                    msg = "❌ فشل تفعيل وضع العرض فقط."
-                    if author_uid == DEV_UID:
-                         msg += f" (تفاصيل: تأكد من صلاحية البوت كـ Host/Co-Host. الخطأ الأخير: {error_detail})"
-                    else:
-                         msg += " (قد تكون الصلاحيات غير كافية للبوت)."
-                         
-                    safe_send(sub, chat_id, msg, replyTo=mid)
-                return
-
-            if isinstance(txt, str) and txt in ("!فتح_الدردشة", "!فتح"):
-                done = False
-                try:
-                    sub.set_chat_permission(chatId=chat_id, permission="all")
-                    done = True
-                except:
-                    try:
-                        sub.update_chat(chatId=chat_id, permission="all")
-                        done = True
-                    except:
-                        try:
-                            sub.set_permissions(chatId=chat_id, permissions={"sendMessage": True})
-                            done = True
-                        except:
-                            pass
-                safe_send(sub, chat_id, "✅ تم فتح الدردشة. سولفوا يالله." if done else "الميزة غير متاحة.", replyTo=mid)
-                return
-
-            if isinstance(txt, str) and txt == "!حذف":
-                try:
-                    reply_msg = exts.get("replyMessage")
-                    target_mid = reply_msg.get("messageId") if isinstance(reply_msg, dict) else None
-                    if target_mid and delete_message(sub, target_mid, chatId=chat_id):
-                        safe_send(sub, chat_id, "✅ حذفت الرسالة عشانك.", replyTo=mid)
-                    else:
-                        safe_send(sub, chat_id, "❌ رد على رسالة عشان أحذفها.", replyTo=mid)
-                except Exception as e:
-                    safe_send(sub, chat_id, f"خطأ بالحذف: {e}", replyTo=mid)
-                return
-
-            if isinstance(txt, str) and txt == "!تثبيت":
-                try:
-                    reply_msg = exts.get("replyMessage")
-                    target_mid = reply_msg.get("messageId") if isinstance(reply_msg, dict) else None
-                    if target_mid and pin_message(sub, target_mid, chatId=chat_id):
-                        safe_send(sub, chat_id, "✅ أبشر تم تثبيت الرسالة.", replyTo=mid)
-                    else:
-                        safe_send(sub, chat_id, "❌ رد على رسالة عشان أثبتها.", replyTo=mid)
-                except Exception as e:
-                    safe_send(sub, chat_id, f"خطأ بالتثبيت: {e}", replyTo=mid)
-                return
-
-            if isinstance(txt, str) and txt.strip() in ("منشن", "!منشن", "!mention", "منشن_الكل"):
-                ok = mention_everyone_in_chat(sub, chat_id, replyTo=mid, message_text="يا جماعة الخير، أحد المشرفين يبغاكم.")
-                safe_send(sub, chat_id, "✅ منشنت الكل، يالله اشغلهم." if ok else "فشل منشن.", replyTo=mid)
-                return
-
-            if isinstance(txt, str) and txt.strip() in ("قائمة المشرفين", "قائمة_المشرفين", "!مشرفين"):
-                supl = get_supervisors_list()
-                out = "المعلمين بالقروب هم:\n" + "\n".join(supl) if supl else "ما عندنا مشرفين حالياً."
-                safe_send(sub, chat_id, out, replyTo=mid)
-                return
-
-            if isinstance(txt, str) and txt.startswith(("اضف قروب", "إضافة قروب", "اضف_ قروب")):
+            if txt_str.startswith(("اضف قروب", "إضافة قروب", "اضف_ قروب")):
                 parts = txt.split()
                 link = None
                 m_link = re.search(r'(https?://aminoapps\.com/p/[a-zA-Z0-9]+)', txt)
@@ -1561,7 +1620,7 @@ def process_message(m, sub, chat_obj):
                     safe_send(sub, chat_id, f"❌ القروب موجود مسبقاً أو صار فيه غلط أثناء الانضمام. تأكد من الرابط.", replyTo=mid)
                 return
 
-            if isinstance(txt, str) and txt.startswith(("ازالة قروب", "ازل قروب", "إزالة قروب", "إزالة_قروب")):
+            if txt_str.startswith(("ازالة قروب", "ازل قروب", "إزالة قروب", "إزالة_قروب")):
                 parts = txt.split()
                 link = None
                 m_link = re.search(r'(https?://aminoapps\.com/p/[a-zA-Z0-9]+)', txt)
@@ -1584,100 +1643,64 @@ def process_message(m, sub, chat_obj):
                 else:
                     safe_send(sub, chat_id, f"❌ القروب مو موجود عندي عشان أحذفه أو فشلت المغادرة.", replyTo=mid)
                 return
-
-            if isinstance(txt, str) and txt.strip() in ("قائمة القروبات", "قروبات", "قائمة_القروبات"):
-                gl = monitored_groups
-                safe_send(sub, chat_id, "القروبات اللي أراقبها:\n" + ("\n".join(gl) if gl else "ما أراقب ولا قروب حالياً."), replyTo=mid)
+            
+            if txt_strip == "ابدا":
+                threading.Thread(target=broadcast_message_all, args=("السلام عليكم ورحمة الله وبركاته",), daemon=True).start()
+                safe_send(sub, chat_id, "✅ تم إرسال السلام لجميع القروبات.", replyTo=mid)
                 return
 
-            if isinstance(txt, str) and txt.strip() in ("بوت", "بوت رايس", "قائمة البوت", "menu", "ميو", "!قائمة", "!menu"):
-                
-                menu = f"""[BC] 🤖 BOT Raise - رايس 🤖
-[C]-----------------------
-[C] ℹ️ اكتب [ !معلومات <منشن/رابط> ] لعرض معلومات العضو.
-[C]-----------------------
-[C] 🔨 اكتب [ حظر قروب <منشن/رابط> ] لحظر دائم.
-[C]-----------------------
-[C] 🔓 اكتب [ عفو عن <منشن/رابط> ] لإلغاء حظر القروب.
-[C]-----------------------
-[C] 🔕 اكتب [ كتم1/2/3 <منشن> ] لكتم العضو (ساعة/يوم/دائم).
-[C]-----------------------
-[C] 📢 اكتب [ فك الكتم <منشن> ] لإلغاء الكتم.
-[C]-----------------------
-[C] 🏃 اكتب [ طرد1/طرد2 <منشن> ] طرد عادي أو نهائي.
-[C]-----------------------
-[C] ⛔ اكتب [ !عرض ] أو [ إطلاع القروب ] لقفل الدردشة.
-[C]-----------------------
-[C] ✅ اكتب [ !فتح ] لفتح الدردشة.
-[C]-----------------------
-[C] 🗑️ اكتب [ !حذف ] (مع رد) لحذف رسالة.
-[C]-----------------------
-[C] 📌 اكتب [ !تثبيت ] (مع رد) لتثبيت رسالة.
-[C]-----------------------
-[C] 📣 اكتب [ منشن ] لمناداة الجميع.
-[C]-----------------------
-[C] ✨ اكتب [ قائمة المشرفين ] لعرض المشرفين الحاليين.
-[C]-----------------------
-[C] 👑 اكتب [ ترقيه إشراف <منشن> ] لإعطاء رتبة الإشراف. (للمطور)
-[C]-----------------------
-[C] 📉 اكتب [ ازاله إشراف <منشن> ] لإزالة رتبة الإشراف.
-[C]-----------------------
-[C] ➕ اكتب [ اضف قروب <رابط> ] لمراقبة قروب جديد. (للمطور)
-[C]-----------------------
-[C] ➖ اكتب [ ازالة قروب <رابط> ] لإلغاء مراقبة قروب. (للمطور)
-[C]-----------------------
-[C] 📜 اكتب [ قائمة القروبات ] لعرض القروبات المراقبة.
-[C]-----------------------
-[C] 🎮 اكتب [ العاب ] لعرض قائمة الألعاب.
-[C]-----------------------
-"""
-                safe_send(sub, chat_id, menu, replyTo=mid)
+            if txt_str.startswith("ارسل اعلان:"):
+                announcement_text = txt.replace("ارسل اعلان:", "", 1).strip()
+                if announcement_text:
+                    full_announcement = f"[BC]📢 إعلان المطور:\n{announcement_text}\n⚡️"
+                    threading.Thread(target=broadcast_message_all, args=(full_announcement,), daemon=True).start()
+                    safe_send(sub, chat_id, "✅ تم إرسال الإعلان لجميع القروبات المراقبة.", replyTo=mid)
+                else:
+                    safe_send(sub, chat_id, "❌ يرجى إضافة نص الإعلان بعد 'ارسل اعلان:'.", replyTo=mid)
                 return
-
         
-        if author_uid == DEV_UID and isinstance(txt, str) and txt.startswith("ارسل اعلان:"):
-            announcement_text = txt.replace("ارسل اعلان:", "", 1).strip()
-            if announcement_text:
-                full_announcement = f"[BC]📢 إعلان المطور:\n{announcement_text}\n⚡️"
-                threading.Thread(target=broadcast_message_all, args=(full_announcement,), daemon=True).start()
-                safe_send(sub, chat_id, "✅ تم إرسال الإعلان لجميع القروبات المراقبة.", replyTo=mid)
-            else:
-                safe_send(sub, chat_id, "❌ يرجى إضافة نص الإعلان بعد 'ارسل اعلان:'.", replyTo=mid)
+        if handle_text_mentioning_dev(txt, sub, chat_id, mid):
             return
 
         lowered = txt.lower()
         contains_name = any(alias in lowered for alias in BOT_ALIASES)
+        
+        GREETING_KEYWORDS = [
+            "السلام عليكم", "سلام عليكم", "سلام", "مرحبا", "هلا", "صباح الخير", 
+            "مساء الخير", "منور", "منوره", "هاي"
+        ]
+        is_greeting = False
+        txt_clean_for_greeting = txt.strip().lower()
+        for g in GREETING_KEYWORDS:
+            if difflib_ratio(g, txt_clean_for_greeting) > 0.8:
+                is_greeting = True
+                break
 
-        if mentioned or reply_to_me or contains_name:
+        if mentioned or reply_to_me or contains_name or is_greeting:
             search_text = txt
-            for alias in BOT_ALIASES:
-                search_text = re.sub(r'\b' + re.escape(alias) + r'\b', '', search_text, flags=re.IGNORECASE).strip()
+            
+            if contains_name and not (mentioned or reply_to_me or is_greeting):
+                for alias in BOT_ALIASES:
+                    search_text = re.sub(r'\b' + re.escape(alias) + r'\b', '', search_text, flags=re.IGNORECASE).strip()
             
             resp = search_in_responses(search_text, chatId=chat_id, threshold=0.5)
             
             if not resp:
-                resp = get_default_response(chatId=chat_id)
+                if not is_greeting:
+                    if GEMINI_API_KEY != "YOUR_GEMINI_API_KEY_HERE" and search_text:
+                        resp = call_gemini(search_text)
+                    else:
+                        resp = get_default_response(chatId=chat_id)
             
-            try:
-                sub.send_message(chatId=chat_id, message=resp, replyTo=mid)
-            except Exception:
-                try:
-                    safe_send(sub, chat_id, resp, replyTo=mid)
-                except:
-                    pass
-            return
-            
-        if txt.strip() in qa_responses:
-            resp = search_in_responses(txt.strip(), chatId=chat_id, threshold=1.0)
             if resp:
                 try:
-                    sub.send_message(chatId=chat_id, message=resp, replyTo=mid)
+                    sub.send_message(chatId=chatId, message=resp, replyTo=mid)
                 except Exception:
                     try:
                         safe_send(sub, chat_id, resp, replyTo=mid)
                     except:
                         pass
-                return
+            return
 
     except Exception as e:
         print("Error processing message:", e)
@@ -1693,7 +1716,7 @@ def broadcast_message_all(text):
                 sub = amino.SubClient(comId=comId, profile=client.profile)
                 try:
                     sub.send_message(chatId=objectId, message=text)
-                    time.sleep(1) 
+                    time.sleep(1)
                 except Exception:
                     pass
         except Exception:
@@ -1729,47 +1752,50 @@ def monitor_loop_for_group(link):
             chat_obj = {"objectId": objectId, "comId": comId}
             chat_id = objectId
             
-            last_member_check = 0 
+            initial_msg = None
+            initial_last_mid = None
+            
+            try:
+                initial_msgs = fetch_messages(sub, chat_id, size=1)
+                if initial_msgs:
+                    initial_msg = initial_msgs[0]
+                    initial_last_mid = initial_msg.get("messageId")
+            except Exception as e:
+                print(f"Failed to fetch initial message for {chat_id}: {e}")
+
+            with message_processing_lock:
+                last_message_processed[chat_id] = initial_last_mid
+            
+            if initial_msg:
+                T(target=process_message, args=(initial_msg, sub, chat_obj), daemon=True).start()
             
             while True:
                 try:
                     
-                    msgs = fetch_messages(sub, chat_id, size=1)
+                    msgs = fetch_messages(sub, chat_id, size=10) 
                     if msgs:
-                        process_message(msgs[0], sub, chat_obj)
-                    
-                    
-                    current_time = time.time()
-                    if current_time - last_member_check >= 20.0: 
-                        last_member_check = current_time
-
-                        if hasattr(sub, "get_chat_members"):
-                            members_resp = sub.get_chat_members(chatId=chat_id)
-                            member_list = members_resp.get("memberList", []) if isinstance(members_resp, dict) else (members_resp or [])
-                            chat_seen = set(seen_members_db.get(chat_id, []))
-                            changed = False
-                            
-                            my_uid = getattr(getattr(client, "profile", {}), "userId", None)
-                            
-                            for m in member_list:
-                                uid = m.get("uid") if isinstance(m, dict) else None
-                                if not uid or uid == my_uid: continue
-                                
-                                
-                                if uid not in chat_seen:
-                                    chat_seen.add(uid)
-                                    changed = True
-                                    
-                                    try:
-                                        mention_user_in_message(sub, chat_id, uid, "مرحبا بك في المجموعة، منورنا يا شنب!")
-                                    except:
-                                        pass
-
-                            if changed:
-                                seen_members_db[chat_id] = list(chat_seen)
-                                save_json(paths["seen"], seen_members_db)
+                        msgs.reverse() 
                         
-                    time.sleep(0.2) 
+                        new_messages = []
+                        with message_processing_lock:
+                            last_known_mid = last_message_processed.get(chat_id)
+
+                            if last_known_mid:
+                                start_index = -1
+                                for i, m in enumerate(msgs):
+                                    if m.get("messageId") == last_known_mid:
+                                        start_index = i
+                                        break
+                                
+                                new_messages = msgs[start_index + 1:]
+                            
+                            if new_messages:
+                                last_message_processed[chat_id] = new_messages[-1].get("messageId")
+                        
+                        for m in new_messages:
+                            T(target=process_message, args=(m, sub, chat_obj), daemon=True).start()
+                    
+                    time.sleep(1) 
 
                 except Exception as e:
                     print(f"خطأ داخل حلقة المراقبة للقروب {link}:", e)
@@ -1781,15 +1807,6 @@ def monitor_loop_for_group(link):
             time.sleep(5)
 
 def main():
-    if 'keep_alive' in sys.modules and hasattr(keep_alive, 'keep_alive'):
-        try:
-            T(target=keep_alive.keep_alive, daemon=True).start()
-            print("✅ تم تشغيل keep_alive.py بنجاح في خيط منفصل.")
-        except Exception as e:
-            print(f"❌ خطأ عند محاولة تشغيل دالة keep_alive() من keep_alive.py: {e}")
-    else:
-        print("❌ لم يتم العثور على ملف keep_alive.py أو الدالة keep_alive() بداخله. لن يتم تفعيل الحفاظ على التشغيل.")
-    
     if not getattr(client, "profile", None):
         try_login()
 
@@ -1815,4 +1832,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
