@@ -30,10 +30,7 @@ from num2words import num2words
 
 import games
 
-EMAIL = "abosaeg8@gmail.com"
-PASSWORD = "foo40k"
-API_KEY = "1bd49e6563fb5b744a999b6c050197a9"
-GEMINI_API_KEY = "YOUR_GEMINI_API_KEY_HERE"
+
 BOT_NAME_AR = "رايس"
 BOT_NAME_EN = "Raise"
 BOT_ALIASES = {BOT_NAME_AR.lower(), BOT_NAME_EN.lower(), "!رايس", "!raise"}
@@ -1832,3 +1829,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
