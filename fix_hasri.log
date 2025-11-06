@@ -1,1 +1,38 @@
-2025-10-12T10:35:13.582212 | حصري.py | replacements: 24 | new: حصري.py
+{
+  "c0784194-8d1f-412d-b700-bf54b8b76904": {
+    "nickname": "المطور",
+    "coins": 0
+  },
+  "8f14d565-c726-4cd9-8755-810ecacf39ae": {
+    "nickname": "عضو",
+    "coins": 0
+  },
+  "3fdf558e-eb86-4906-abcd-db4c87242764": {
+    "nickname": "عضو",
+    "coins": 15
+  },
+  "2b100b25-8ebb-4982-9e51-ac9eaa380f14": {
+    "nickname": "عضو",
+    "coins": 0
+  },
+  "ec5cbb0b-25b7-423b-b538-e6e9f67c6fcd": {
+    "nickname": "عضو",
+    "coins": 0
+  },
+  "48ad53fb-edb2-4d96-8f02-432eaac06a88": {
+    "nickname": "عضو",
+    "coins": 0
+  },
+  "8e9f41b0-d135-48df-833d-5c79adff1d75": {
+    "nickname": "عضو",
+    "coins": 8
+  },
+  "8d38c373-41dd-49fd-b011-1c7d8a334aaa": {
+    "nickname": "عضو",
+    "coins": 15
+  },
+  "57e001ba-2822-47ed-b0e7-aa74b6836eb3": {
+    "nickname": "عضو",
+    "coins": 15
+  }
+}
